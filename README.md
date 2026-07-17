@@ -19,6 +19,30 @@ styled to **The ExCo Group** brand system. Zero external dependencies — just N
 
 Real-time updates use Server-Sent Events, so nothing needs installing beyond Node.
 
+## Deploying to DigitalOcean App Platform
+
+The app runs as a single always-on Node process (that's what powers the live SSE
+broadcast), so it deploys to App Platform as one **web service, single instance**.
+
+1. **Push to GitHub.** Create a private repo under the ExCo org and push this project:
+   ```
+   git remote add origin git@github.com:your-org/exco-live.git
+   git push -u origin main
+   ```
+2. **Create the app.** In DigitalOcean → **Apps → Create App**, connect that repo.
+   App Platform auto-detects Node and the spec in [`.do/app.yaml`](.do/app.yaml).
+   (Or from a machine with `doctl` authed to the ExCo team: edit the `repo:` field in
+   `.do/app.yaml`, then `doctl apps create --spec .do/app.yaml`.)
+3. **Keep it at 1 instance.** The spec pins `instance_count: 1` — required, because live
+   results fan out over SSE from one in-memory process. Basic plan (~$5/mo) is plenty.
+4. **Custom domain.** Add e.g. `live.excoleadership.com` in the app's Settings → Domains,
+   then add the CNAME it gives you to DNS. TLS is automatic.
+
+**Persistence caveat:** App Platform containers have an *ephemeral* filesystem, so saved
+sessions and agenda templates reset on each redeploy/restart. That's fine for per-event
+polls, but if reusable agendas must survive redeploys, add a small **DO Managed Postgres**
+(or Spaces) and I'll wire the store to it — set `DATA_DIR` or a DB URL via app env vars.
+
 ## Preloading questions (seamless event presenting)
 
 Three ways to get questions in before you go on stage:
