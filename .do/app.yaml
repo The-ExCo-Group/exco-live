@@ -1,0 +1,29 @@
+# DigitalOcean App Platform spec for ExCo Live.
+# Deploy: connect this GitHub repo in the App Platform UI (it auto-detects
+# this file), or run:  doctl apps create --spec .do/app.yaml
+#
+# IMPORTANT: instance_count MUST stay 1. Live results are broadcast over SSE
+# from a single in-memory process; running >1 instance would split audiences
+# across processes and break the realtime fan-out. To scale beyond one
+# instance you'd add a shared pub/sub (e.g. Redis) + shared store first.
+name: exco-live
+region: nyc
+services:
+  - name: web
+    # --- source: point this at the repo you push to ---
+    github:
+      repo: your-org/exco-live      # <-- change to your GitHub org/repo
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    # --- runtime ---
+    run_command: node server.js
+    environment_slug: node-js
+    instance_count: 1               # keep at 1 (see note above)
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    http_port: 8080                 # App Platform sets PORT=8080; server reads process.env.PORT
+    envs:
+      - key: NODE_ENV
+        value: production
+    health_check:
+      http_path: /healthz

@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Present · ExCo Live</title>
+  <link rel="icon" href="/static/brand/favicon.ico" sizes="any" />
+  <link rel="apple-touch-icon" href="/static/brand/favicon-180.png" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="wrap" style="max-width:1240px">
+    <div class="topbar">
+      <div class="logo"><img src="/static/brand/exco-logo-white.png" alt="The ExCo Group" /><span class="product">Live</span></div>
+      <div class="row" style="align-items:center">
+        <span class="pill live"><span class="ping"></span> Live</span>
+        <span class="muted small">Join at <b id="hostUrl"></b> &nbsp;·&nbsp; code</span>
+        <span class="code-badge" id="codeBadge" style="font-size:26px"></span>
+      </div>
+    </div>
+    <hr class="thread" />
+
+    <div class="row" style="align-items:flex-start; gap:24px; margin-top:24px;">
+      <!-- LEFT: control rail -->
+      <div style="flex:0 0 360px; max-width:360px;">
+        <div class="card">
+          <p class="eyebrow">Run of Show</p>
+          <h2 id="roomTitle">Session</h2>
+          <div class="row tight">
+            <button class="btn grow" onclick="openCreate()">+ New poll</button>
+            <button class="btn ghost grow" onclick="openImport()">Preload</button>
+          </div>
+          <hr class="divider" />
+          <div id="pollList"></div>
+          <hr class="divider" />
+          <div class="row tight">
+            <button class="btn ghost sm grow" onclick="openSaveAgenda()">Save agenda</button>
+            <button class="btn ghost sm grow" onclick="openLoadAgenda()">Load agenda</button>
+          </div>
+        </div>
+
+        <div class="card tint">
+          <p class="eyebrow">Share</p>
+          <p class="small muted" style="margin-top:0">Anyone on your network can join — no login.</p>
+          <div class="center" style="margin:12px 0;"><div class="qr" id="qr"></div></div>
+          <div class="center code-badge" id="codeBadge2"></div>
+          <p class="center small muted" id="joinLink"></p>
+          <button class="btn ghost full sm" onclick="copyLink()">Copy join link</button>
+        </div>
+      </div>
+
+      <!-- RIGHT: stage -->
+      <div class="grow">
+        <div class="card" id="stage" style="min-height:440px;">
+          <div class="row" id="stageNav" style="align-items:center; margin-bottom:18px;">
+            <button class="btn ghost sm" id="prevBtn" onclick="step(-1)">◀ Prev</button>
+            <span class="type-chip" id="navPos"></span>
+            <button class="btn sm" id="nextBtn" onclick="step(1)">Next ▶</button>
+            <span class="muted small" style="margin-left:8px">← → to navigate</span>
+          </div>
+          <div class="empty" id="stageEmpty">
+            <p class="eyebrow">No poll on screen</p>
+            <h2 style="border:0">Preload your questions, then step through them live.</h2>
+            <p class="muted">Use <b>Preload</b> to paste a whole run of show, or <b>+ New poll</b> to add one. Hit <b>Next</b> or → to present.</p>
+          </div>
+          <div id="stageContent" class="hidden"></div>
+        </div>
+
+        <div class="card">
+          <div class="row" style="align-items:center"><p class="eyebrow" style="margin:0">Audience Q&amp;A</p>
+            <span class="pill right" id="qCount">0</span></div>
+          <div id="qaBoard" style="margin-top:14px"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create poll modal -->
+  <div id="modal" class="modal-bg hidden">
+    <div class="modal-card">
+      <div class="row" style="align-items:center"><p class="eyebrow" style="margin:0">New poll</p>
+        <button class="btn ghost sm right" onclick="closeCreate()">Close</button></div>
+      <label>Type</label>
+      <select id="pType" onchange="renderTypeFields()">
+        <option value="multiple_choice">Multiple choice</option>
+        <option value="word_cloud">Word cloud</option>
+        <option value="rating">Rating / scale</option>
+        <option value="open_text">Open text</option>
+      </select>
+      <label>Question</label>
+      <input id="pQuestion" type="text" placeholder="What should we ask?" />
+      <div id="typeFields"></div>
+      <div style="height:18px"></div>
+      <div class="row">
+        <button class="btn go grow" onclick="createPoll(true)">Create &amp; present</button>
+        <button class="btn ghost" onclick="createPoll(false)">Add to run of show</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Import / preload modal -->
+  <div id="importModal" class="modal-bg hidden">
+    <div class="modal-card">
+      <div class="row" style="align-items:center"><p class="eyebrow" style="margin:0">Preload questions</p>
+        <button class="btn ghost sm right" onclick="closeImport()">Close</button></div>
+      <p class="sub" style="margin:10px 0 12px">Paste your whole run of show. One block per question — they load in order as drafts you can present one by one.</p>
+      <div class="help">[mc] Which region are you joining from?
+- Americas
+- EMEA
+- APAC
+
+[rating 1-5] How prepared do you feel? | Not at all | Fully
+
+[wordcloud] One word for this quarter?
+
+[text] What's the biggest barrier to your team's performance?</div>
+      <label>Your questions</label>
+      <textarea id="importText" style="min-height:200px; font-family:ui-monospace,Menlo,monospace; font-size:13px"></textarea>
+      <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-family:var(--font-body);font-size:14px;color:var(--text)">
+        <input type="checkbox" id="importReplace" style="width:auto" /> Replace existing unanswered drafts</label>
+      <div style="height:14px"></div>
+      <div class="row"><button class="btn go grow" onclick="runImport()">Load questions</button></div>
+    </div>
+  </div>
+
+  <!-- Save agenda modal -->
+  <div id="saveModal" class="modal-bg hidden">
+    <div class="modal-card" style="max-width:460px">
+      <p class="eyebrow">Save agenda template</p>
+      <p class="sub" style="margin:8px 0 12px">Save this run of show to reuse at your next event.</p>
+      <label>Template name</label>
+      <input id="agendaName" type="text" placeholder="e.g. Leadership Offsite 2026" />
+      <div style="height:14px"></div>
+      <div class="row"><button class="btn go grow" onclick="saveAgenda()">Save</button>
+        <button class="btn ghost" onclick="closeModal('saveModal')">Cancel</button></div>
+    </div>
+  </div>
+
+  <!-- Load agenda modal -->
+  <div id="loadModal" class="modal-bg hidden">
+    <div class="modal-card" style="max-width:460px">
+      <p class="eyebrow">Load agenda template</p>
+      <p class="sub" style="margin:8px 0 12px">Preload a saved run of show into this session.</p>
+      <div id="agendaList"></div>
+      <div style="height:8px"></div>
+      <button class="btn ghost full" onclick="closeModal('loadModal')">Cancel</button>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="/static/qrcode.js"></script>
+  <script src="/static/present.js"></script>
+</body>
+</html>

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ExCo Live</title>
+  <link rel="icon" href="/static/brand/favicon.ico" sizes="any" />
+  <link rel="apple-touch-icon" href="/static/brand/favicon-180.png" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="wrap narrow">
+    <div class="topbar">
+      <div class="logo"><img src="/static/brand/exco-logo-white.png" alt="The ExCo Group" /><span class="product">Live</span></div>
+    </div>
+
+    <div class="card">
+      <p class="eyebrow">Interactive Sessions</p>
+      <h1>Join a session</h1>
+      <p class="sub">Enter the code shown on screen to vote, respond, and ask questions.</p>
+      <label for="joinCode">Session code</label>
+      <div class="row">
+        <input id="joinCode" class="grow" type="text" placeholder="e.g. K7M2P" autocomplete="off"
+               style="text-transform:uppercase; letter-spacing:0.2em;" maxlength="6" />
+        <button class="btn" onclick="joinRoom()">Join</button>
+      </div>
+      <p id="joinErr" class="small" style="color:var(--green); margin-top:8px;"></p>
+    </div>
+
+    <div class="card tint">
+      <p class="eyebrow">Present</p>
+      <h2>Host a new session</h2>
+      <p class="sub">Create a room, preload your questions, and present live results on the big screen.</p>
+      <label for="title">Session title</label>
+      <input id="title" type="text" placeholder="Q3 All-Hands" autocomplete="off" />
+      <div style="height:16px"></div>
+      <button class="btn go full" onclick="createRoom()">Create session</button>
+    </div>
+
+    <p class="center small muted" style="margin-top:24px">Multiple choice &nbsp;·&nbsp; Word cloud &nbsp;·&nbsp; Rating &amp; open text &nbsp;·&nbsp; Live Q&amp;A</p>
+  </div>
+
+  <script>
+    async function createRoom() {
+      const title = document.getElementById('title').value.trim();
+      const res = await fetch('/api/room', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title }),
+      });
+      const data = await res.json();
+      if (data.code) location.href = '/present/' + data.code;
+    }
+
+    async function joinRoom() {
+      const code = document.getElementById('joinCode').value.trim().toUpperCase();
+      const err = document.getElementById('joinErr');
+      err.textContent = '';
+      if (!code) return;
+      const res = await fetch('/api/room/' + code);
+      if (res.ok) location.href = '/join/' + code;
+      else err.textContent = "That session code wasn't found.";
+    }
+
+    document.getElementById('joinCode').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') joinRoom();
+    });
+  </script>
+</body>
+</html>

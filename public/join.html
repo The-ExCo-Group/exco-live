@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Join · ExCo Live</title>
+  <link rel="icon" href="/static/brand/favicon.ico" sizes="any" />
+  <link rel="apple-touch-icon" href="/static/brand/favicon-180.png" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="wrap narrow">
+    <div class="topbar">
+      <div class="logo"><img src="/static/brand/exco-logo-white.png" alt="The ExCo Group" /><span class="product">Live</span></div>
+      <span class="pill" id="codePill"></span>
+    </div>
+
+    <div class="tabbar">
+      <div class="tab active" id="tabVote" onclick="showTab('vote')">Live poll</div>
+      <div class="tab" id="tabQa" onclick="showTab('qa')">Q&amp;A</div>
+    </div>
+
+    <!-- VOTE panel -->
+    <div id="panelVote">
+      <div class="card" id="voteCard">
+        <div class="empty" id="voteEmpty">
+          <h2>Waiting for the host…</h2>
+          <p>The live poll will appear here the moment it starts.</p>
+        </div>
+        <div id="voteContent" class="hidden"></div>
+      </div>
+    </div>
+
+    <!-- QA panel -->
+    <div id="panelQa" class="hidden">
+      <div class="card">
+        <h2>Ask a question</h2>
+        <textarea id="qInput" placeholder="Type your question for the host…" maxlength="280"></textarea>
+        <div style="height:10px"></div>
+        <button class="btn go full" onclick="askQuestion()">Submit question</button>
+      </div>
+      <div class="card">
+        <div class="row" style="align-items:center"><h2 style="margin:0">Top questions</h2>
+          <span class="pill right" id="qCountP">0</span></div>
+        <p class="small muted">Upvote the ones you want answered.</p>
+        <div id="qaList" style="margin-top:8px"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="/static/join.js"></script>
+</body>
+</html>

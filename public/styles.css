@@ -1,0 +1,222 @@
+/* ============================================================
+   ExCo Live — visual system
+   Matched to excoleadership.com: black / charcoal grounds, light
+   type, off-white relief. ExCo blue (#00527A) is the workhorse CTA,
+   ExCo green (#73B278) the primary "go" action. Data bars: blue base,
+   green marks the leader. The 45° gradient anchors the logo + thread.
+   Type is hero — D-DIN heads, Lato body, Newsreader proof numerals.
+   ============================================================ */
+
+/* ---- Fonts ---- */
+@font-face { font-family: "D-DIN"; src: url("/static/fonts/D-DIN.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "D-DIN"; src: url("/static/fonts/D-DIN-Bold.woff2") format("woff2"); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: "D-DIN"; src: url("/static/fonts/D-DIN-Italic.woff2") format("woff2"); font-weight: 400; font-style: italic; font-display: swap; }
+@font-face { font-family: "Lato"; src: url("/static/fonts/Lato-Regular.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "Lato"; src: url("/static/fonts/Lato-Bold.woff2") format("woff2"); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: "Lato"; src: url("/static/fonts/Lato-Black.woff2") format("woff2"); font-weight: 900; font-style: normal; font-display: swap; }
+@font-face { font-family: "Lato"; src: url("/static/fonts/Lato-Italic.woff2") format("woff2"); font-weight: 400; font-style: italic; font-display: swap; }
+@font-face { font-family: "Newsreader"; src: url("/static/fonts/Newsreader.woff2") format("woff2"); font-weight: 200 700; font-style: normal; font-display: swap; }
+@font-face { font-family: "Newsreader"; src: url("/static/fonts/Newsreader-Italic.woff2") format("woff2"); font-weight: 200 700; font-style: italic; font-display: swap; }
+
+:root {
+  --bg: #0c0d0e;          /* near-black page ground (site hero) */
+  --surface: #17181a;     /* cards */
+  --surface-2: #202224;   /* tinted cards / tracks */
+  --line: #2b2d30;        /* hairlines */
+  --line-strong: #3c3f43;
+  --text: #f5f6f7;
+  --muted: #9aa0a6;
+  --muted-2: #6c7176;
+
+  --blue: #00527a;        /* workhorse CTA + data base */
+  --blue-hi: #0a6ea6;
+  --green: #73b278;       /* primary "go" CTA + leader highlight */
+  --green-hi: #8ac48f;
+  --gradient: linear-gradient(45deg, #00527a 0%, #73b278 100%);
+
+  --font-display: "D-DIN", "DIN", Arial, sans-serif;
+  --font-body: "Lato", Arial, sans-serif;
+  --font-serif: "Newsreader", Georgia, serif;
+
+  --eyebrow-track: 0.23em;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur: 550ms;
+  --radius: 4px;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-weight: 400; line-height: 1.5; min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--green); }
+
+.wrap { max-width: 1180px; margin: 0 auto; padding: 32px 28px 64px; }
+.narrow { max-width: 620px; }
+
+/* ---- Topbar ---- */
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 40px; }
+.logo { display: flex; align-items: center; gap: 10px; }
+.logo img { height: 30px; width: auto; display: block; }
+.logo .product { font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: var(--eyebrow-track); font-size: 12px; color: var(--muted); padding-left: 12px; margin-left: 4px; border-left: 1px solid var(--line-strong); }
+
+/* ---- Eyebrow / kicker ---- */
+.eyebrow { font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: var(--eyebrow-track); font-size: 12px; color: var(--muted); margin: 0 0 14px; }
+
+/* ---- Typography ---- */
+h1 { font-family: var(--font-display); font-weight: 700; font-size: clamp(34px, 5vw, 58px); line-height: 1.02; letter-spacing: -0.01em; margin: 0 0 12px; }
+h2 { font-family: var(--font-display); font-weight: 700; font-size: 22px; letter-spacing: -0.005em; margin: 0 0 16px; }
+.sub { color: var(--muted); margin: 0 0 26px; font-size: 16px; max-width: 46ch; }
+
+label { display: block; font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: 0.14em; font-size: 11px; color: var(--muted); margin: 18px 0 7px; }
+
+input[type="text"], input[type="number"], textarea, select {
+  width: 100%; background: var(--surface-2); border: 1px solid var(--line-strong); color: var(--text);
+  border-radius: var(--radius); padding: 13px 14px; font-size: 16px; font-family: var(--font-body);
+  outline: none; transition: border-color var(--dur) var(--ease);
+}
+input::placeholder, textarea::placeholder { color: var(--muted-2); }
+input:focus, textarea:focus, select:focus { border-color: var(--green); }
+textarea { resize: vertical; min-height: 76px; line-height: 1.5; }
+select { appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 18px) 20px, calc(100% - 13px) 20px; background-size: 5px 5px; background-repeat: no-repeat; }
+
+/* ---- Cards ----
+   White cards on the black ground. Redefining the neutral tokens here flips every
+   descendant (text, hairlines, fields, tracks, tiles) to dark-on-white automatically.
+   The brand tokens (--blue/--green/--gradient) are intentionally NOT overridden.
+   The topbar lives outside any card, so it keeps the light-on-black tokens. */
+.card, .modal-card {
+  --text: #111214;
+  --muted: #585e63;
+  --muted-2: #878d93;
+  --line: #e6e8ea;
+  --line-strong: #d1d5d8;
+  --surface: #ffffff;
+  --surface-2: #f3f4f6;
+  color: var(--text);
+}
+.card { background: #ffffff; border: 1px solid var(--line); border-radius: var(--radius); padding: 26px; }
+.card.tint { background: var(--surface-2); }
+.card + .card { margin-top: 20px; }
+
+/* ---- Buttons ----
+   .btn      workhorse primary — ExCo blue
+   .btn.go   primary affirmative action — ExCo green
+   .btn.ghost tertiary — hairline
+   .btn.danger destructive/quiet                                  */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: var(--blue); color: #fff; border: 1px solid var(--blue); border-radius: var(--radius); padding: 13px 22px; font-family: var(--font-display); font-weight: 700; font-size: 14px; text-transform: uppercase; letter-spacing: 0.08em; cursor: pointer; text-decoration: none; transition: background var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease), opacity var(--dur) var(--ease); }
+.btn:hover { background: var(--blue-hi); border-color: var(--blue-hi); }
+.btn.full { width: 100%; }
+.btn.go { background: var(--green); color: #0c0d0e; border-color: var(--green); }
+.btn.go:hover { background: var(--green-hi); border-color: var(--green-hi); }
+.btn.ghost { background: transparent; color: var(--text); border-color: var(--line-strong); }
+.btn.ghost:hover { background: var(--surface-2); border-color: var(--text); }
+.btn.danger { background: transparent; color: var(--muted); border-color: var(--line-strong); }
+.btn.danger:hover { color: var(--text); border-color: var(--text); }
+.btn.sm { padding: 8px 13px; font-size: 12px; }
+.btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+.row { display: flex; gap: 12px; flex-wrap: wrap; }
+.row.tight { gap: 7px; }
+.grow { flex: 1; }
+.right { margin-left: auto; }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+.center { text-align: center; }
+.hidden { display: none !important; }
+.stack > * + * { margin-top: 10px; }
+
+/* ---- Gradient hairline thread ---- */
+.thread { height: 2px; border: 0; background: var(--gradient); margin: 0; }
+hr.divider { height: 1px; background: var(--line); margin: 22px 0; border: 0; }
+
+/* ---- Pills / labels ---- */
+.pill { display: inline-flex; align-items: center; gap: 7px; background: transparent; border: 1px solid var(--line-strong); padding: 5px 11px; border-radius: 999px; font-family: var(--font-display); font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.12em; }
+.pill.live { color: #fff; border-color: var(--green); }
+.pill.live .ping { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: ping 1.6s var(--ease) infinite; }
+@keyframes ping { 0% { opacity: 1; } 50% { opacity: 0.25; } 100% { opacity: 1; } }
+
+.type-chip { font-family: var(--font-display); font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); font-weight: 700; }
+
+/* ---- Join code ---- */
+.code-badge { font-family: var(--font-display); font-weight: 700; letter-spacing: 0.32em; font-size: clamp(30px, 6vw, 56px); color: var(--text); }
+
+/* ---- Bars: blue base, green marks the leader ---- */
+.bars { display: flex; flex-direction: column; gap: 16px; margin-top: 10px; }
+.bar-row .bar-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 7px; }
+.bar-row .bar-label { font-family: var(--font-display); font-weight: 700; font-size: 18px; }
+.bar-row .bar-val { font-family: var(--font-serif); font-weight: 500; font-size: 20px; color: var(--muted); }
+.bar-track { height: 40px; background: var(--surface-2); border-radius: var(--radius); overflow: hidden; }
+.bar-fill { height: 100%; background: var(--blue); transition: width var(--dur) var(--ease); min-width: 2px; }
+.bar-fill.lead { background: var(--green); }
+
+/* ---- Proof numerals ---- */
+.stat-big { font-family: var(--font-serif); font-weight: 500; font-size: 64px; line-height: 1; letter-spacing: -0.02em; }
+.stat-grad { background: var(--gradient); -webkit-background-clip: text; background-clip: text; color: transparent; }
+
+/* ---- Word cloud ---- */
+.cloud { display: flex; flex-wrap: wrap; gap: 4px 22px; align-items: baseline; justify-content: center; padding: 26px 0; }
+.cloud span { font-family: var(--font-display); font-weight: 700; line-height: 1.05; color: var(--muted); transition: font-size var(--dur) var(--ease); }
+.cloud span.top { background: var(--gradient); -webkit-background-clip: text; background-clip: text; color: transparent; }
+
+/* ---- Open-text responses ---- */
+.responses { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; margin-top: 10px; }
+.response { background: var(--surface-2); border: 1px solid var(--line); border-left: 2px solid var(--green); border-radius: var(--radius); padding: 16px; font-size: 16px; animation: fade var(--dur) var(--ease); }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+
+/* ---- Q&A ---- */
+.qitem { display: flex; gap: 14px; align-items: center; border-bottom: 1px solid var(--line); padding: 14px 2px; }
+.qvote { display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 52px; padding: 7px; border-radius: var(--radius); border: 1px solid var(--line-strong); background: var(--surface-2); cursor: pointer; font-family: var(--font-display); font-weight: 700; color: var(--text); user-select: none; transition: border-color var(--dur) var(--ease); }
+.qvote:hover { border-color: var(--green); }
+.qvote.voted { border-color: var(--green); background: var(--green); color: #0c0d0e; }
+.qvote .arrow { font-size: 13px; line-height: 1; }
+.qtext { flex: 1; font-size: 17px; }
+
+/* ---- Toast ---- */
+.toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(14px); background: var(--green); color: #0c0d0e; padding: 12px 22px; border-radius: 999px; font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; font-size: 12px; opacity: 0; transition: all var(--dur) var(--ease); pointer-events: none; z-index: 50; }
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ---- Tabs (join) ---- */
+.tabbar { display: flex; gap: 0; margin-bottom: 22px; border-bottom: 1px solid var(--line); }
+.tab { flex: 1; text-align: center; padding: 14px; cursor: pointer; font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; font-size: 12px; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tab.active { color: var(--text); border-bottom-color: var(--green); }
+
+/* ---- Presenter poll list / run of show ---- */
+.poll-list-item { display: flex; align-items: center; gap: 12px; padding: 13px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-2); margin-bottom: 10px; }
+.poll-list-item.active { border-color: var(--green); }
+.poll-list-item .idx { font-family: var(--font-serif); font-size: 18px; color: var(--muted); min-width: 20px; text-align: center; }
+.poll-list-item.active .idx { color: var(--green); }
+.poll-list-item.ros { display: block; }
+.ros .pli-main { display: flex; align-items: flex-start; gap: 10px; }
+.ros .pli-q { font-family: var(--font-display); font-weight: 700; font-size: 15px; line-height: 1.2; margin-top: 3px; }
+.ros .pli-controls { display: flex; align-items: center; gap: 6px; margin-top: 11px; }
+.ros .pli-controls .spacer { flex: 1; }
+.ros .pli-controls .btn.sm { padding: 7px 11px; }
+
+.option-editor { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+
+/* ---- Participant answer options ---- */
+.answer-btn { display: block; width: 100%; text-align: left; background: var(--surface-2); border: 1px solid var(--line-strong); color: var(--text); border-radius: var(--radius); padding: 18px 18px; font-family: var(--font-display); font-weight: 700; font-size: 18px; margin-bottom: 12px; cursor: pointer; transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease), color var(--dur) var(--ease); }
+.answer-btn:hover { border-color: var(--green); }
+.answer-btn.chosen { border-color: var(--green); background: var(--green); color: #0c0d0e; }
+
+.scale-btn { flex: 1; min-width: 46px; background: var(--surface-2); border: 1px solid var(--line-strong); color: var(--text); border-radius: var(--radius); padding: 16px 0; font-family: var(--font-serif); font-size: 22px; cursor: pointer; transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease), color var(--dur) var(--ease); }
+.scale-btn:hover { border-color: var(--green); }
+.scale-btn.chosen { border-color: var(--green); background: var(--green); color: #0c0d0e; }
+
+.empty { text-align: center; color: var(--muted); padding: 48px 12px; }
+.qr { background: #fff; padding: 14px; border: 1px solid var(--line); border-radius: var(--radius); display: inline-block; }
+.qr svg { display: block; }
+.big-q { font-family: var(--font-display); font-weight: 700; font-size: clamp(26px, 3.4vw, 44px); line-height: 1.06; letter-spacing: -0.01em; margin-bottom: 24px; }
+
+/* ---- Modal ---- */
+.modal-bg { position: fixed; inset: 0; background: rgba(4, 5, 6, 0.78); display: flex; align-items: center; justify-content: center; z-index: 40; padding: 20px; }
+.modal-card { background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius); max-width: 620px; width: 100%; max-height: 92vh; overflow: auto; padding: 28px; box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5); }
+
+.help { font-family: var(--font-body); font-size: 13px; color: var(--muted); background: var(--surface-2); border-radius: var(--radius); padding: 12px 14px; white-space: pre-wrap; line-height: 1.6; }
+code { font-family: ui-monospace, Menlo, monospace; font-size: 0.92em; background: var(--surface-2); padding: 1px 5px; border-radius: 3px; }

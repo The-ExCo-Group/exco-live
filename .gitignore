@@ -1,0 +1,8 @@
+node_modules/
+# runtime state (ephemeral on App Platform; not source)
+data.json
+agendas.json
+*.log
+.DS_Store
+.env
+.env.*
