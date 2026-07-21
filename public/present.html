@@ -37,6 +37,16 @@
             <button class="btn ghost sm grow" onclick="openSaveAgenda()">Save agenda</button>
             <button class="btn ghost sm grow" onclick="openLoadAgenda()">Load agenda</button>
           </div>
+          <hr class="divider" />
+          <p class="eyebrow">Session</p>
+          <div class="row tight">
+            <button class="btn ghost sm grow" onclick="exportCsv()">⤓ Export CSV</button>
+            <a class="btn ghost sm grow" href="/dashboard" style="text-decoration:none">Dashboard</a>
+          </div>
+          <div class="row tight" style="margin-top:7px">
+            <button class="btn ghost sm grow" onclick="endSession()">End session</button>
+            <button class="btn danger sm" onclick="deleteSession()">Delete</button>
+          </div>
         </div>
 
         <div class="card tint">

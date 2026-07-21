@@ -242,6 +242,123 @@ async function load() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Analytics / export (reads from Supabase — includes ended events not in memory)
+// ---------------------------------------------------------------------------
+
+// Summary of every session for the dashboard list.
+async function analyticsList() {
+  if (!SB_ENABLED) return { sessions: [], totals: { sessions: 0, responses: 0, questions: 0 } };
+  const [roomRows, pollRows, qRows] = await Promise.all([
+    sb('GET', '/rooms?select=code,title,created_at,ended_at,active_poll_id&order=created_at.desc'),
+    sb('GET', '/polls?select=room_code,total_votes'),
+    sb('GET', '/questions?select=room_code'),
+  ]);
+  const pollAgg = {};   // room_code -> { polls, responses }
+  for (const p of pollRows || []) {
+    const a = (pollAgg[p.room_code] = pollAgg[p.room_code] || { polls: 0, responses: 0 });
+    a.polls++;
+    a.responses += p.total_votes || 0;
+  }
+  const qAgg = {};      // room_code -> count
+  for (const q of qRows || []) qAgg[q.room_code] = (qAgg[q.room_code] || 0) + 1;
+
+  const sessions = (roomRows || []).map((r) => ({
+    code: r.code,
+    title: r.title,
+    createdAt: r.created_at,
+    endedAt: r.ended_at,
+    live: !r.ended_at,
+    polls: (pollAgg[r.code] || {}).polls || 0,
+    responses: (pollAgg[r.code] || {}).responses || 0,
+    questions: qAgg[r.code] || 0,
+  }));
+  const totals = sessions.reduce(
+    (t, s) => ({ sessions: t.sessions + 1, responses: t.responses + s.responses, questions: t.questions + s.questions }),
+    { sessions: 0, responses: 0, questions: 0 }
+  );
+  return { sessions, totals };
+}
+
+// Full detail for one session (for dashboard drill-down + CSV).
+async function fetchRoomDetail(code) {
+  if (!SB_ENABLED) return null;
+  const rows = await sb('GET', `/rooms?code=eq.${code}&select=*`);
+  const r = (rows || [])[0];
+  if (!r) return null;
+  const [polls, questions] = await Promise.all([
+    sb('GET', `/polls?room_code=eq.${code}&select=*&order=position`),
+    sb('GET', `/questions?room_code=eq.${code}&select=text,votes&order=votes.desc`),
+  ]);
+  return {
+    code: r.code,
+    title: r.title,
+    createdAt: r.created_at,
+    endedAt: r.ended_at,
+    activePollId: r.active_poll_id,
+    polls: (polls || []).map((p) => ({
+      position: p.position,
+      type: p.type,
+      question: p.question,
+      state: p.state,
+      options: p.options || [],
+      scaleMax: p.scale_max,
+      scaleLabelLow: p.scale_label_low,
+      scaleLabelHigh: p.scale_label_high,
+      votes: p.votes || {},
+      words: p.words || [],
+      ratings: p.ratings || [],
+      responses: p.responses || [],
+      totalVotes: p.total_votes || 0,
+    })),
+    questions: questions || [],
+  };
+}
+
+// One CSV cell (quote + escape).
+function csvCell(v) {
+  const s = String(v == null ? '' : v);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+// Flatten a session's results into analysis-friendly CSV rows.
+function toCSV(d) {
+  const header = ['session', 'code', 'date', 'poll', 'type', 'question', 'answer', 'count', 'percent'];
+  const rows = [header];
+  const date = (d.createdAt || '').slice(0, 10);
+  const add = (poll, type, question, answer, count, percent) =>
+    rows.push([d.title, d.code, date, poll, type, question, answer, count, percent]);
+
+  d.polls.forEach((p) => {
+    const n = p.position + 1;
+    if (p.type === 'multiple_choice') {
+      const total = Object.values(p.votes).reduce((a, b) => a + b, 0);
+      p.options.forEach((o) => {
+        const v = p.votes[o.id] || 0;
+        add(n, p.type, p.question, o.text, v, total ? Math.round((v / total) * 100) + '%' : '0%');
+      });
+    } else if (p.type === 'rating') {
+      const counts = {};
+      p.ratings.forEach((r) => (counts[r] = (counts[r] || 0) + 1));
+      const nR = p.ratings.length;
+      const avg = nR ? (p.ratings.reduce((a, b) => a + b, 0) / nR).toFixed(2) : '';
+      for (let v = 1; v <= (p.scaleMax || 5); v++) {
+        const c = counts[v] || 0;
+        add(n, p.type, p.question, v, c, nR ? Math.round((c / nR) * 100) + '%' : '0%');
+      }
+      add(n, p.type, p.question, 'AVERAGE', avg, '');
+    } else if (p.type === 'word_cloud') {
+      const freq = {};
+      p.words.forEach((w) => { const k = w.toLowerCase(); freq[k] = (freq[k] || 0) + 1; });
+      Object.entries(freq).sort((a, b) => b[1] - a[1]).forEach(([w, c]) => add(n, p.type, p.question, w, c, ''));
+    } else if (p.type === 'open_text') {
+      p.responses.forEach((r) => add(n, p.type, p.question, r.text, 1, ''));
+    }
+  });
+  d.questions.forEach((q) => add('', 'qa', 'Audience Q&A', q.text, q.votes, ''));
+  return rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
+}
+
 // Convert a room's polls back into reusable definitions (strip live results/ids).
 function pollsToDefs(polls) {
   return polls.map((p) => ({
@@ -322,6 +439,21 @@ function broadcast(code) {
       /* dead connection cleaned up on close */
     }
   }
+}
+
+// Tell everyone watching a room that it has ended, then close their streams.
+function endStreams(code) {
+  const set = clients.get(code);
+  if (!set) return;
+  for (const res of set) {
+    try {
+      res.write(`data: ${JSON.stringify({ ended: true })}\n\n`);
+      res.end();
+    } catch {
+      /* ignore */
+    }
+  }
+  clients.delete(code);
 }
 
 function send(res, status, obj) {
@@ -461,6 +593,9 @@ const server = http.createServer(async (req, res) => {
     if (parts[0] === 'present' && parts[1]) {
       return serveFile(res, path.join(PUBLIC_DIR, 'present.html'));
     }
+    if (parts[0] === 'dashboard') {
+      return serveFile(res, path.join(PUBLIC_DIR, 'dashboard.html'));
+    }
     if ((parts[0] === 'join' || parts[0] === 'r') && parts[1]) {
       return serveFile(res, path.join(PUBLIC_DIR, 'join.html'));
     }
@@ -539,6 +674,27 @@ async function handleApi(req, res, seg, url) {
     return send(res, 200, { ok: true });
   }
 
+  // ---- Analytics / export (cross-event dashboard + per-event CSV) ------
+  if (seg[0] === 'analytics' && seg.length === 1 && req.method === 'GET') {
+    return send(res, 200, await analyticsList());
+  }
+  if (seg[0] === 'analytics' && seg[1] && req.method === 'GET') {
+    const detail = await fetchRoomDetail(seg[1].toUpperCase());
+    if (!detail) return notFound(res);
+    return send(res, 200, detail);
+  }
+  if (seg[0] === 'room' && seg[2] === 'export.csv' && req.method === 'GET') {
+    const detail = await fetchRoomDetail((seg[1] || '').toUpperCase());
+    if (!detail) return notFound(res);
+    const csv = '﻿' + toCSV(detail); // BOM so Excel reads UTF-8
+    res.writeHead(200, {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="exco-live-${detail.code}.csv"`,
+      'Cache-Control': 'no-store',
+    });
+    return res.end(csv);
+  }
+
   // Everything below is scoped to a room code at seg[1]
   const code = (seg[1] || '').toUpperCase();
   const room = rooms[code];
@@ -577,6 +733,33 @@ async function handleApi(req, res, seg, url) {
       if (set) set.delete(res);
     });
     return;
+  }
+
+  // POST /api/room/:code/end — end a live session: archive it (keep the data
+  // for analytics), tell joiners it's over, and drop it from the live layer.
+  if (seg[0] === 'room' && seg[2] === 'end' && req.method === 'POST') {
+    if (!room) return notFound(res);
+    dirty.delete(code); // cancel any pending write-through (would race the archive)
+    if (SB_ENABLED) {
+      try { await sb('PATCH', `/rooms?code=eq.${code}`, { body: { ended_at: iso() }, prefer: 'return=minimal' }); }
+      catch (e) { console.error('end session persist failed:', e.message); }
+    }
+    endStreams(code);
+    delete rooms[code];
+    return send(res, 200, { ok: true });
+  }
+
+  // POST /api/room/:code/delete — permanently remove a session and its data.
+  // Works whether the session is live (in memory) or archived (Supabase only).
+  if (seg[0] === 'room' && seg[2] === 'delete' && req.method === 'POST') {
+    dirty.delete(code);
+    if (SB_ENABLED) {
+      try { await sb('DELETE', `/rooms?code=eq.${code}`); } // cascade clears polls/questions
+      catch (e) { console.error('delete session failed:', e.message); }
+    }
+    endStreams(code);
+    delete rooms[code];
+    return send(res, 200, { ok: true });
   }
 
   if (!room && seg[0] === 'room') return notFound(res);

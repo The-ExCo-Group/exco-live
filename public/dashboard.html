@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dashboard · ExCo Live</title>
+  <link rel="icon" href="/static/brand/favicon.ico" sizes="any" />
+  <link rel="apple-touch-icon" href="/static/brand/favicon-180.png" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="logo"><img src="/static/brand/exco-logo-white.png" alt="The ExCo Group" /><span class="product">Live</span></div>
+      <a class="btn sm" href="/" style="text-decoration:none">+ New session</a>
+    </div>
+    <hr class="thread" />
+
+    <div style="margin-top:26px">
+      <p class="eyebrow">Analytics</p>
+      <h1 style="font-size:clamp(30px,4vw,46px)">Sessions &amp; results</h1>
+    </div>
+
+    <div class="row" id="totals" style="gap:16px; margin:20px 0 26px;"></div>
+
+    <div class="card">
+      <div class="row" style="align-items:center"><p class="eyebrow" style="margin:0">All sessions</p>
+        <span class="pill right" id="sessionCount">0</span></div>
+      <div id="sessionList" style="margin-top:16px">
+        <p class="empty">Loading…</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Session detail -->
+  <div id="detailModal" class="modal-bg hidden">
+    <div class="modal-card" style="max-width:820px">
+      <div class="row" style="align-items:center">
+        <p class="eyebrow" id="detailKicker" style="margin:0">Session</p>
+        <button class="btn ghost sm right" onclick="closeDetail()">Close</button>
+      </div>
+      <h2 id="detailTitle" style="margin:10px 0 4px">—</h2>
+      <p class="small muted" id="detailMeta" style="margin:0 0 18px"></p>
+      <div class="row tight" style="margin-bottom:18px">
+        <button class="btn sm" id="detailCsv">⤓ Export CSV</button>
+      </div>
+      <div id="detailBody"></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

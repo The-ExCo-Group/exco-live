@@ -13,10 +13,37 @@ if (window.QR) QR.render(document.getElementById('qr'), joinUrl, { size: 168 });
 
 function connect() {
   const es = new EventSource('/api/stream/' + CODE);
-  es.onmessage = (e) => { state = JSON.parse(e.data); render(); };
+  es.onmessage = (e) => {
+    const d = JSON.parse(e.data);
+    if (d.ended) { showEnded(); es.close(); return; }
+    state = d;
+    render();
+  };
   es.onerror = () => {/* auto-reconnect */};
 }
 connect();
+
+function showEnded() {
+  document.body.innerHTML =
+    '<div class="wrap" style="max-width:620px"><div class="card center" style="margin-top:80px">' +
+    '<p class="eyebrow">Session ended</p><h2 style="border:0">This session has been closed.</h2>' +
+    '<p class="muted">Results are saved. View them anytime on the dashboard.</p>' +
+    '<div style="height:16px"></div><a class="btn" href="/dashboard" style="text-decoration:none">Go to dashboard</a></div></div>';
+}
+
+// ---- session controls -----------------------------------------------------
+function exportCsv() { window.location = '/api/room/' + CODE + '/export.csv'; }
+
+async function endSession() {
+  if (!confirm('End this session? It stops accepting responses and closes for anyone who joined. Results are kept for the dashboard.')) return;
+  await api('/end');
+  window.location = '/dashboard';
+}
+async function deleteSession() {
+  if (!confirm('Permanently DELETE this session and all its results? This cannot be undone.')) return;
+  await api('/delete');
+  window.location = '/';
+}
 
 async function api(pathSuffix, body) {
   const res = await fetch('/api/room/' + CODE + pathSuffix, {

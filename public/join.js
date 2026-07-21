@@ -16,9 +16,25 @@ document.getElementById('codePill').textContent = CODE;
 
 function connect() {
   const es = new EventSource('/api/stream/' + CODE);
-  es.onmessage = (e) => { state = JSON.parse(e.data); render(); };
+  es.onmessage = (e) => {
+    const d = JSON.parse(e.data);
+    if (d.ended) { showEnded(); es.close(); return; }
+    state = d;
+    render();
+  };
 }
 connect();
+
+function showEnded() {
+  document.getElementById('panelVote').innerHTML =
+    '<div class="card center"><p class="eyebrow">Session ended</p>' +
+    '<h2 style="border:0">Thanks for taking part.</h2>' +
+    '<p class="muted">This session has been closed by the host.</p></div>';
+  document.getElementById('panelQa').classList.add('hidden');
+  document.getElementById('panelVote').classList.remove('hidden');
+  const tb = document.querySelector('.tabbar');
+  if (tb) tb.classList.add('hidden');
+}
 
 async function api(pathSuffix, body) {
   const res = await fetch('/api/room/' + CODE + pathSuffix, {
@@ -57,6 +73,8 @@ function renderVote() {
   const poll = state.polls.find((p) => p.id === state.activePollId);
 
   if (!poll) {
+    const t = document.getElementById('joinTitle');
+    if (t) t.textContent = state.title && state.title !== 'Untitled session' ? state.title : 'Waiting for the host…';
     empty.classList.remove('hidden');
     content.classList.add('hidden');
     lastPollId = null;
