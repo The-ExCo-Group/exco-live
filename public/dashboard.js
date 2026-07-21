@@ -32,7 +32,7 @@ function aiNotConfigured() {
     '<p class="muted" style="margin:0">Set the <code>ANTHROPIC_API_KEY</code> environment variable on the server to turn on AI features.</p></div>';
 }
 async function aiCall(title, path) {
-  aiShow(title, '<p class="empty">✨ Thinking…</p>');
+  aiShow(title, '<p class="empty">Thinking…</p>');
   let res;
   try { res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); }
   catch { aiShow(title, '<p class="empty">Network error — try again.</p>'); return null; }
@@ -44,7 +44,7 @@ function bullets(arr) {
   return (arr && arr.length) ? '<ul style="margin:6px 0 0;padding-left:20px">' + arr.map((x) => '<li style="margin-bottom:4px">' + esc(x) + '</li>').join('') + '</ul>' : '<p class="muted small">—</p>';
 }
 async function aiDebrief(code) {
-  const d = await aiCall('✨ Session debrief', '/api/room/' + code + '/ai/debrief');
+  const d = await aiCall('Session debrief', '/api/room/' + code + '/ai/debrief');
   if (!d) return;
   let html = '<h2 style="margin:0 0 6px">' + esc(d.headline || '') + '</h2>';
   html += '<p class="sub">' + esc(d.summary || '') + '</p>';
@@ -52,10 +52,10 @@ async function aiDebrief(code) {
   html += '<p class="eyebrow" style="margin-top:14px">Q&amp;A themes</p>' + bullets(d.qaThemes);
   html += '<p class="eyebrow" style="margin-top:14px">Notable quotes</p>' + bullets(d.quotes);
   html += '<p class="eyebrow" style="margin-top:14px">Recommended follow-ups</p>' + bullets(d.followUps);
-  aiShow('✨ Session debrief', html);
+  aiShow('Session debrief', html);
 }
 async function aiTrends() {
-  const d = await aiCall('✨ Cross-event trends', '/api/ai/trends');
+  const d = await aiCall('Cross-event trends', '/api/ai/trends');
   if (!d) return;
   let html = '<p class="sub">' + esc(d.summary || '') + '</p>';
   if (d.trends && d.trends.length) {
@@ -64,7 +64,7 @@ async function aiTrends() {
       '<p class="small" style="margin:6px 0 0">' + esc(t.detail) + '</p></div>').join('');
   }
   html += '<p class="eyebrow" style="margin-top:8px">Recommendations</p>' + bullets(d.recommendations);
-  aiShow('✨ Cross-event trends', html);
+  aiShow('Cross-event trends', html);
 }
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') document.getElementById('aiModal').classList.add('hidden'); });
 

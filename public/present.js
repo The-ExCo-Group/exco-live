@@ -93,7 +93,7 @@ function aiNotConfigured() {
     '<p class="muted" style="margin:0">Set the <code>ANTHROPIC_API_KEY</code> environment variable on the server to turn on AI features.</p></div>';
 }
 async function aiCall(title, path, body) {
-  aiShow(title, '<p class="empty">✨ Thinking…</p>');
+  aiShow(title, '<p class="empty">Thinking…</p>');
   let res;
   try {
     res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
@@ -104,7 +104,7 @@ async function aiCall(title, path, body) {
 }
 
 async function aiQa() {
-  const d = await aiCall('✨ Q&A themes', '/api/room/' + CODE + '/ai/qa', {});
+  const d = await aiCall('Q&A themes', '/api/room/' + CODE + '/ai/qa', {});
   if (!d) return;
   let html = d.overview ? '<p class="sub">' + esc(d.overview) + '</p>' : '';
   if (!d.themes || !d.themes.length) html += '<p class="empty">No themes yet.</p>';
@@ -114,11 +114,11 @@ async function aiQa() {
     '<span class="pill right">' + (t.count || 0) + '</span></div>' +
     '<p class="small" style="margin:6px 0 0">' + esc(t.summary) + '</p>' +
     (t.sample ? '<p class="small muted" style="margin:6px 0 0">e.g. “' + esc(t.sample) + '”</p>' : '') + '</div>').join('');
-  aiShow('✨ Q&A themes', html);
+  aiShow('Q&A themes', html);
 }
 
 async function aiSynth(pollId) {
-  const d = await aiCall('✨ Response synthesis', '/api/room/' + CODE + '/poll/' + pollId + '/ai/synthesize', {});
+  const d = await aiCall('Response synthesis', '/api/room/' + CODE + '/poll/' + pollId + '/ai/synthesize', {});
   if (!d) return;
   let html = '<div class="row" style="gap:10px;align-items:baseline;margin-bottom:6px"><span class="type-chip">Sentiment</span>' +
     '<b style="font-family:var(--font-display);font-size:16px">' + esc(d.sentiment || '') + '</b></div>';
@@ -131,7 +131,7 @@ async function aiSynth(pollId) {
     html += '<p class="eyebrow" style="margin-top:12px">Representative quotes</p><div class="responses">' +
       d.quotes.map((q) => '<div class="response">' + esc(q) + '</div>').join('') + '</div>';
   }
-  aiShow('✨ Response synthesis', html);
+  aiShow('Response synthesis', html);
 }
 
 async function aiDraft() {
@@ -139,7 +139,7 @@ async function aiDraft() {
   if (!topic) { toast('Enter a topic to draft'); return; }
   const type = document.getElementById('pType').value;
   const btn = document.getElementById('aiDraftBtn');
-  const label = btn.textContent; btn.textContent = '✨ …'; btn.disabled = true;
+  const label = btn.textContent; btn.textContent = '…'; btn.disabled = true;
   let res;
   try {
     res = await fetch('/api/ai/draft-poll', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ topic, type }) });
@@ -392,7 +392,7 @@ function renderStage() {
     '<div class="row" style="align-items:center;margin-bottom:8px">' +
     '<span class="type-chip">' + TYPE_LABEL[poll.type] + '</span>' +
     '<span class="pill right">' + poll.totalVotes + ' responses</span>' +
-    (canSynth ? '<button class="btn ghost sm" onclick="aiSynth(\'' + poll.id + '\')">✨ AI: Synthesize</button>' : '') +
+    (canSynth ? '<button class="btn ghost sm" onclick="aiSynth(\'' + poll.id + '\')">AI: Synthesize</button>' : '') +
     '<button class="btn ghost sm" onclick="api(\'/poll/' + poll.id + '/reset\')">Reset</button>' +
     '<button class="btn danger sm" onclick="api(\'/poll/' + poll.id + '/close\')">End</button>' +
     '</div>' +
