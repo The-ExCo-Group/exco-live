@@ -40,8 +40,8 @@ services:
       # ANTHROPIC_API_KEY is a SECRET — do NOT hard-code it here. Add it in the
       # DO dashboard (App > Settings > web > Environment Variables, type SECRET).
       # Without it, AI features report "not configured"; the rest of the app is
-      # unaffected. ANTHROPIC_MODEL is optional (defaults to claude-opus-4-8).
+      # unaffected. ANTHROPIC_MODEL is optional (server default: claude-haiku-4-5).
       - key: ANTHROPIC_MODEL
-        value: claude-opus-4-8
+        value: claude-haiku-4-5
     health_check:
       http_path: /healthz

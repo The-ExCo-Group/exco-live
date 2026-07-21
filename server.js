@@ -32,7 +32,7 @@ const SB_ENABLED = !!(SUPABASE_URL && SUPABASE_KEY);
 // ANTHROPIC_BASE_URL. If the key is unset, AI endpoints report "not configured"
 // and the rest of the app is unaffected.
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY || '';
-const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-opus-4-8';
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5';
 const ANTHROPIC_BASE = (process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com').replace(/\/$/, '');
 const AI_ENABLED = !!ANTHROPIC_KEY;
 

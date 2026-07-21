@@ -50,9 +50,10 @@ Claude API (called server-side over plain HTTPS — no npm dependency): live **Q
 clustering** and **open-text / word-cloud synthesis** on the presenter console, an **AI
 poll drafter** in the New-poll modal, and a per-event **debrief** plus **cross-event
 trends** on the dashboard. Env vars: `ANTHROPIC_API_KEY` (required to enable),
-`ANTHROPIC_MODEL` (optional, defaults to `claude-opus-4-8` — set `claude-haiku-4-5` for
-faster/cheaper live responses), and `ANTHROPIC_BASE_URL` (optional). If the key is unset,
-the AI buttons report "not configured" and nothing else is affected.
+`ANTHROPIC_MODEL` (optional, defaults to `claude-haiku-4-5` for fast, low-cost live
+responses — set another model, e.g. `claude-opus-4-8`, for higher-quality analysis), and
+`ANTHROPIC_BASE_URL` (optional). If the key is unset, the AI buttons report "not
+configured" and nothing else is affected.
 
 ## Preloading questions (seamless event presenting)
 
