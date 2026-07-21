@@ -508,7 +508,7 @@ function sessionCorpus(d) {
       p.options.forEach((o) => lines.push(`  - ${o.text}: ${p.votes[o.id] || 0} (${Math.round((100 * (p.votes[o.id] || 0)) / total)}%)`));
     } else if (p.type === 'rating') {
       const n = p.ratings.length; const avg = n ? (p.ratings.reduce((a, b) => a + b, 0) / n).toFixed(2) : '0';
-      lines.push(`  average ${avg} of ${n} ratings (${p.scaleLabelLow}..${p.scaleLabelHigh})`);
+      lines.push(`  average rating ${avg} on a 1-${p.scaleMax || 5} scale, from ${n} responses (${p.scaleLabelLow || 'low'}=low .. ${p.scaleLabelHigh || 'high'}=high)`);
     } else if (p.type === 'word_cloud') {
       lines.push('  words: ' + p.words.join(', '));
     } else if (p.type === 'open_text') {
