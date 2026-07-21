@@ -36,5 +36,12 @@ services:
         value: https://hstnpuwbjtemdzbezvzw.supabase.co
       - key: SUPABASE_KEY
         value: sb_publishable_ThtnFIrDyLBRWEtKFSbn7g_OSVsQVOz
+      # --- AI features (Claude) ---
+      # ANTHROPIC_API_KEY is a SECRET — do NOT hard-code it here. Add it in the
+      # DO dashboard (App > Settings > web > Environment Variables, type SECRET).
+      # Without it, AI features report "not configured"; the rest of the app is
+      # unaffected. ANTHROPIC_MODEL is optional (defaults to claude-opus-4-8).
+      - key: ANTHROPIC_MODEL
+        value: claude-opus-4-8
     health_check:
       http_path: /healthz

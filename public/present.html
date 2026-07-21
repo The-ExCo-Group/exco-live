@@ -80,6 +80,7 @@
 
         <div class="card">
           <div class="row" style="align-items:center"><p class="eyebrow" style="margin:0">Audience Q&amp;A</p>
+            <button class="btn ghost sm" onclick="aiQa()">✨ AI: Group questions</button>
             <span class="pill right" id="qCount">0</span></div>
           <div id="qaBoard" style="margin-top:14px"></div>
         </div>
@@ -99,6 +100,11 @@
         <option value="rating">Rating / scale</option>
         <option value="open_text">Open text</option>
       </select>
+      <label>Draft with AI</label>
+      <div class="row tight">
+        <input id="pTopic" class="grow" type="text" placeholder="Topic, e.g. biggest Q4 risk" />
+        <button class="btn ghost" onclick="aiDraft()" id="aiDraftBtn">✨ Draft</button>
+      </div>
       <label>Question</label>
       <input id="pQuestion" type="text" placeholder="What should we ask?" />
       <div id="typeFields"></div>
@@ -169,6 +175,17 @@
       <div class="js-code code-badge" id="joinScreenCode"></div>
       <p class="js-url" id="joinScreenUrl"></p>
       <p class="js-hint">Point your phone camera at the code — no app, no login.</p>
+    </div>
+  </div>
+
+  <!-- AI result modal -->
+  <div id="aiModal" class="modal-bg hidden">
+    <div class="modal-card" style="max-width:680px">
+      <div class="row" style="align-items:center">
+        <p class="eyebrow" id="aiTitle" style="margin:0">✨ AI</p>
+        <button class="btn ghost sm right" onclick="closeModal('aiModal')">Close</button>
+      </div>
+      <div id="aiBody" style="margin-top:14px"></div>
     </div>
   </div>
 

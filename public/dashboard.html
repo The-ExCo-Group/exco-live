@@ -16,9 +16,12 @@
     </div>
     <hr class="thread" />
 
-    <div style="margin-top:26px">
-      <p class="eyebrow">Analytics</p>
-      <h1 style="font-size:clamp(30px,4vw,46px)">Sessions &amp; results</h1>
+    <div class="row" style="margin-top:26px; align-items:flex-end; justify-content:space-between">
+      <div>
+        <p class="eyebrow">Analytics</p>
+        <h1 style="font-size:clamp(30px,4vw,46px); margin-bottom:0">Sessions &amp; results</h1>
+      </div>
+      <button class="btn ghost" onclick="aiTrends()">✨ AI: Cross-event trends</button>
     </div>
 
     <div class="row" id="totals" style="gap:16px; margin:20px 0 26px;"></div>
@@ -43,8 +46,20 @@
       <p class="small muted" id="detailMeta" style="margin:0 0 18px"></p>
       <div class="row tight" style="margin-bottom:18px">
         <button class="btn sm" id="detailCsv">⤓ Export CSV</button>
+        <button class="btn ghost sm" id="detailDebrief">✨ AI debrief</button>
       </div>
       <div id="detailBody"></div>
+    </div>
+  </div>
+
+  <!-- AI result modal -->
+  <div id="aiModal" class="modal-bg hidden">
+    <div class="modal-card" style="max-width:720px">
+      <div class="row" style="align-items:center">
+        <p class="eyebrow" id="aiTitle" style="margin:0">✨ AI</p>
+        <button class="btn ghost sm right" onclick="document.getElementById('aiModal').classList.add('hidden')">Close</button>
+      </div>
+      <div id="aiBody" style="margin-top:14px"></div>
     </div>
   </div>
 

@@ -25,6 +25,17 @@ const SUPABASE_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
 const SB_ENABLED = !!(SUPABASE_URL && SUPABASE_KEY);
 
+// --- Claude API (AI features) ---------------------------------------------
+// Powers the AI endpoints (Q&A clustering, response synthesis, poll drafting,
+// event debrief, cross-event trends). Configure via env: ANTHROPIC_API_KEY
+// (required to enable), ANTHROPIC_MODEL (defaults to Opus 4.8), and optionally
+// ANTHROPIC_BASE_URL. If the key is unset, AI endpoints report "not configured"
+// and the rest of the app is unaffected.
+const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY || '';
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-opus-4-8';
+const ANTHROPIC_BASE = (process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com').replace(/\/$/, '');
+const AI_ENABLED = !!ANTHROPIC_KEY;
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -358,6 +369,197 @@ function toCSV(d) {
   });
   d.questions.forEach((q) => add('', 'qa', 'Audience Q&A', q.text, q.votes, '', q.author));
   return rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
+}
+
+// ---------------------------------------------------------------------------
+// AI features — Claude Messages API over Node's built-in https (no dependency).
+// Uses structured outputs (output_config.format) so responses are valid JSON.
+// ---------------------------------------------------------------------------
+function claude({ system, user, schema, maxTokens = 2048 }) {
+  return new Promise((resolve, reject) => {
+    const body = {
+      model: ANTHROPIC_MODEL,
+      max_tokens: maxTokens,
+      messages: [{ role: 'user', content: user }],
+    };
+    if (system) body.system = system;
+    if (schema) body.output_config = { format: { type: 'json_schema', schema } };
+    const payload = JSON.stringify(body);
+    const url = new URL(ANTHROPIC_BASE + '/v1/messages');
+    const transport = url.protocol === 'http:' ? http : https;
+    const req = transport.request(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(payload),
+        'x-api-key': ANTHROPIC_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+    }, (res) => {
+      let data = '';
+      res.on('data', (c) => (data += c));
+      res.on('end', () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          return reject(new Error(`anthropic ${res.statusCode}: ${data.slice(0, 300)}`));
+        }
+        try {
+          const json = JSON.parse(data);
+          const text = (json.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+          if (!schema) return resolve(text);
+          try { resolve(JSON.parse(text)); }
+          catch { reject(new Error('model did not return valid JSON')); }
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+// JSON-schema helper: object with all listed string/array props required.
+const strObj = (props, req) => ({ type: 'object', additionalProperties: false, properties: props, required: req });
+
+// 1) Cluster & summarize a room's Q&A questions.
+function aiQaClusters(room) {
+  const qs = room.questions;
+  if (!qs.length) return Promise.resolve({ themes: [], overview: 'No audience questions yet.' });
+  const user =
+    `Session: "${room.title}".\nAudience questions (with upvotes):\n` +
+    qs.map((q, i) => `${i + 1}. (${q.votes} upvotes) ${q.text}`).join('\n');
+  return claude({
+    system:
+      'You help a live-event host make sense of audience questions. Group similar or ' +
+      'duplicate questions into a few clear themes. Rank themes by combined interest ' +
+      '(number of questions + their upvotes). Keep titles and summaries short and neutral. ' +
+      'Return at most 6 themes.',
+    user,
+    maxTokens: 1500,
+    schema: strObj({
+      themes: {
+        type: 'array',
+        items: strObj({
+          title: { type: 'string' },
+          summary: { type: 'string' },
+          count: { type: 'integer' },
+          sample: { type: 'string' },
+        }, ['title', 'summary', 'count', 'sample']),
+      },
+      overview: { type: 'string' },
+    }, ['themes', 'overview']),
+  });
+}
+
+// 2) Synthesize open-text / word-cloud responses for a poll.
+function aiSynthesize(poll) {
+  let items = [];
+  if (poll.type === 'open_text') items = poll.responses.map((r) => r.text);
+  else if (poll.type === 'word_cloud') items = poll.words;
+  else return Promise.reject(new Error('synthesis applies to open-text and word-cloud polls'));
+  if (!items.length) return Promise.resolve({ themes: [], sentiment: 'no responses yet', quotes: [], pulse: 'No responses submitted yet.' });
+  const user =
+    `Question: "${poll.question}"\nResponses (${items.length}):\n` + items.map((t) => `- ${t}`).join('\n');
+  return claude({
+    system:
+      'You synthesize live audience responses for a presenter to read aloud. Identify the ' +
+      'main themes, gauge overall sentiment in a few words, pull 2-4 short representative ' +
+      'verbatim quotes, and write a one-sentence "pulse of the room". Be concise and neutral.',
+    user,
+    maxTokens: 1500,
+    schema: strObj({
+      themes: {
+        type: 'array',
+        items: strObj({ label: { type: 'string' }, summary: { type: 'string' } }, ['label', 'summary']),
+      },
+      sentiment: { type: 'string' },
+      quotes: { type: 'array', items: { type: 'string' } },
+      pulse: { type: 'string' },
+    }, ['themes', 'sentiment', 'quotes', 'pulse']),
+  });
+}
+
+// 3) Draft a poll from a topic.
+function aiDraftPoll(topic, type) {
+  const t = ['multiple_choice', 'word_cloud', 'rating', 'open_text'].includes(type) ? type : 'multiple_choice';
+  return claude({
+    system:
+      'You draft a single audience poll for a live leadership session. Write one clear, ' +
+      'neutral question. For multiple_choice, give 2-5 concise, mutually distinct options. ' +
+      'For rating, leave options empty and give short low/high scale labels. For word_cloud ' +
+      'and open_text, leave options empty and scale labels empty. Only fill fields that apply.',
+    user: `Poll type: ${t}\nTopic: ${topic}`,
+    maxTokens: 500,
+    schema: strObj({
+      question: { type: 'string' },
+      options: { type: 'array', items: { type: 'string' } },
+      scaleLabelLow: { type: 'string' },
+      scaleLabelHigh: { type: 'string' },
+    }, ['question', 'options', 'scaleLabelLow', 'scaleLabelHigh']),
+  });
+}
+
+// Compact text corpus of a session's results (shared by debrief).
+function sessionCorpus(d) {
+  const lines = [`Session: "${d.title}" (${(d.createdAt || '').slice(0, 10)})`];
+  d.polls.forEach((p, i) => {
+    lines.push(`\nPoll ${i + 1} [${p.type}]: ${p.question}`);
+    if (p.type === 'multiple_choice') {
+      const total = Object.values(p.votes).reduce((a, b) => a + b, 0) || 1;
+      p.options.forEach((o) => lines.push(`  - ${o.text}: ${p.votes[o.id] || 0} (${Math.round((100 * (p.votes[o.id] || 0)) / total)}%)`));
+    } else if (p.type === 'rating') {
+      const n = p.ratings.length; const avg = n ? (p.ratings.reduce((a, b) => a + b, 0) / n).toFixed(2) : '0';
+      lines.push(`  average ${avg} of ${n} ratings (${p.scaleLabelLow}..${p.scaleLabelHigh})`);
+    } else if (p.type === 'word_cloud') {
+      lines.push('  words: ' + p.words.join(', '));
+    } else if (p.type === 'open_text') {
+      p.responses.forEach((r) => lines.push(`  · ${r.text}`));
+    }
+  });
+  if (d.questions.length) lines.push('\nAudience Q&A:\n' + d.questions.map((q) => `  (${q.votes}) ${q.text}`).join('\n'));
+  return lines.join('\n');
+}
+
+// 4) Executive debrief for one session.
+function aiDebrief(detail) {
+  return claude({
+    system:
+      'You are an executive facilitator writing a concise post-session debrief for The ExCo ' +
+      'Group (leadership advisory). From the polling and Q&A data, write a one-line headline, ' +
+      'a short summary, the key takeaways per poll, the main Q&A themes, a few notable verbatim ' +
+      'quotes, and concrete recommended follow-ups. Be specific and grounded in the data only.',
+    user: sessionCorpus(detail),
+    maxTokens: 3000,
+    schema: strObj({
+      headline: { type: 'string' },
+      summary: { type: 'string' },
+      pollTakeaways: { type: 'array', items: { type: 'string' } },
+      qaThemes: { type: 'array', items: { type: 'string' } },
+      quotes: { type: 'array', items: { type: 'string' } },
+      followUps: { type: 'array', items: { type: 'string' } },
+    }, ['headline', 'summary', 'pollTakeaways', 'qaThemes', 'quotes', 'followUps']),
+  });
+}
+
+// 5) Cross-event trends across multiple session detail objects.
+function aiTrends(details) {
+  const corpus = details.map(sessionCorpus).join('\n\n---\n\n');
+  return claude({
+    system:
+      'You analyze audience polling across multiple leadership sessions for The ExCo Group. ' +
+      'Identify cross-event trends, recurring themes, and notable shifts over time. Write a ' +
+      'short summary, a list of trends (each a title + detail), and concrete recommendations. ' +
+      'Ground everything in the data provided.',
+    user: `Sessions (oldest to newest as listed):\n\n${corpus}`,
+    maxTokens: 3000,
+    schema: strObj({
+      summary: { type: 'string' },
+      trends: {
+        type: 'array',
+        items: strObj({ title: { type: 'string' }, detail: { type: 'string' } }, ['title', 'detail']),
+      },
+      recommendations: { type: 'array', items: { type: 'string' } },
+    }, ['summary', 'trends', 'recommendations']),
+  });
 }
 
 // Convert a room's polls back into reusable definitions (strip live results/ids).
@@ -696,6 +898,29 @@ async function handleApi(req, res, seg, url) {
     return res.end(csv);
   }
 
+  // ---- AI (Claude) — draft poll, cross-event trends, per-event debrief ---
+  if (seg[0] === 'ai' && seg[1] === 'draft-poll' && req.method === 'POST') {
+    if (!AI_ENABLED) return send(res, 503, { error: 'ai_not_configured' });
+    const body = await readBody(req);
+    const topic = clean(body.topic, 400);
+    if (!topic) return send(res, 400, { error: 'topic_required' });
+    return send(res, 200, await aiDraftPoll(topic, body.type));
+  }
+  if (seg[0] === 'ai' && seg[1] === 'trends' && req.method === 'POST') {
+    if (!AI_ENABLED) return send(res, 503, { error: 'ai_not_configured' });
+    const { sessions } = await analyticsList();
+    const recent = sessions.slice(0, 25).reverse(); // oldest→newest, cap for token budget
+    const details = (await Promise.all(recent.map((s) => fetchRoomDetail(s.code)))).filter(Boolean);
+    if (details.length < 2) return send(res, 200, { summary: 'Need at least two past sessions to spot trends.', trends: [], recommendations: [] });
+    return send(res, 200, await aiTrends(details));
+  }
+  if (seg[0] === 'room' && seg[2] === 'ai' && seg[3] === 'debrief' && req.method === 'POST') {
+    if (!AI_ENABLED) return send(res, 503, { error: 'ai_not_configured' });
+    const detail = await fetchRoomDetail((seg[1] || '').toUpperCase());
+    if (!detail) return notFound(res);
+    return send(res, 200, await aiDebrief(detail));
+  }
+
   // Everything below is scoped to a room code at seg[1]
   const code = (seg[1] || '').toUpperCase();
   const room = rooms[code];
@@ -770,6 +995,13 @@ async function handleApi(req, res, seg, url) {
     const action = seg[2];
     const body = await readBody(req);
 
+    // ---- AI: cluster & summarize the Q&A board ----------------------
+    if (action === 'ai' && seg[3] === 'qa') {
+      if (!AI_ENABLED) return send(res, 503, { error: 'ai_not_configured' });
+      try { return send(res, 200, await aiQaClusters(room)); }
+      catch (e) { return send(res, 502, { error: 'ai_error', message: e.message }); }
+    }
+
     // ---- Poll management (presenter) --------------------------------
     if (action === 'poll' && seg[3] === undefined) {
       const poll = makePoll(body);
@@ -810,6 +1042,13 @@ async function handleApi(req, res, seg, url) {
 
     if (action === 'poll' && seg[3] && poll) {
       const op = seg[4];
+
+      // AI: synthesize open-text / word-cloud responses for this poll
+      if (op === 'ai' && seg[5] === 'synthesize') {
+        if (!AI_ENABLED) return send(res, 503, { error: 'ai_not_configured' });
+        try { return send(res, 200, await aiSynthesize(poll)); }
+        catch (e) { return send(res, 502, { error: 'ai_error', message: e.message }); }
+      }
 
       // activate — makes this the live poll
       if (op === 'activate') {

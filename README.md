@@ -45,6 +45,15 @@ writes through to Supabase, and the server reloads from it on boot. Configure vi
 env vars — `SUPABASE_URL` and `SUPABASE_KEY` (the publishable key). If they're unset the
 app runs in-memory only (no persistence), which is a safe fallback for local dev.
 
+**AI features (Claude):** With an `ANTHROPIC_API_KEY` set, the app adds AI helpers via the
+Claude API (called server-side over plain HTTPS — no npm dependency): live **Q&A theme
+clustering** and **open-text / word-cloud synthesis** on the presenter console, an **AI
+poll drafter** in the New-poll modal, and a per-event **debrief** plus **cross-event
+trends** on the dashboard. Env vars: `ANTHROPIC_API_KEY` (required to enable),
+`ANTHROPIC_MODEL` (optional, defaults to `claude-opus-4-8` — set `claude-haiku-4-5` for
+faster/cheaper live responses), and `ANTHROPIC_BASE_URL` (optional). If the key is unset,
+the AI buttons report "not configured" and nothing else is affected.
+
 ## Preloading questions (seamless event presenting)
 
 Three ways to get questions in before you go on stage:

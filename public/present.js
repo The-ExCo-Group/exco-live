@@ -82,6 +82,85 @@ const TYPE_LABEL = {
   multiple_choice: 'Multiple choice', word_cloud: 'Word cloud', rating: 'Rating', open_text: 'Open text',
 };
 
+// ---- AI features ----------------------------------------------------------
+function aiShow(title, html) {
+  document.getElementById('aiTitle').textContent = title;
+  document.getElementById('aiBody').innerHTML = html;
+  document.getElementById('aiModal').classList.remove('hidden');
+}
+function aiNotConfigured() {
+  return '<div class="card tint"><p class="eyebrow">AI not configured</p>' +
+    '<p class="muted" style="margin:0">Set the <code>ANTHROPIC_API_KEY</code> environment variable on the server to turn on AI features.</p></div>';
+}
+async function aiCall(title, path, body) {
+  aiShow(title, '<p class="empty">✨ Thinking…</p>');
+  let res;
+  try {
+    res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  } catch { aiShow(title, '<p class="empty">Network error — try again.</p>'); return null; }
+  if (res.status === 503) { aiShow(title, aiNotConfigured()); return null; }
+  if (!res.ok) { aiShow(title, '<p class="empty">AI request failed — try again.</p>'); return null; }
+  return res.json().catch(() => null);
+}
+
+async function aiQa() {
+  const d = await aiCall('✨ Q&A themes', '/api/room/' + CODE + '/ai/qa', {});
+  if (!d) return;
+  let html = d.overview ? '<p class="sub">' + esc(d.overview) + '</p>' : '';
+  if (!d.themes || !d.themes.length) html += '<p class="empty">No themes yet.</p>';
+  else html += d.themes.map((t) =>
+    '<div class="card" style="margin-bottom:12px"><div class="row" style="align-items:center">' +
+    '<b style="font-family:var(--font-display);font-size:16px">' + esc(t.title) + '</b>' +
+    '<span class="pill right">' + (t.count || 0) + '</span></div>' +
+    '<p class="small" style="margin:6px 0 0">' + esc(t.summary) + '</p>' +
+    (t.sample ? '<p class="small muted" style="margin:6px 0 0">e.g. “' + esc(t.sample) + '”</p>' : '') + '</div>').join('');
+  aiShow('✨ Q&A themes', html);
+}
+
+async function aiSynth(pollId) {
+  const d = await aiCall('✨ Response synthesis', '/api/room/' + CODE + '/poll/' + pollId + '/ai/synthesize', {});
+  if (!d) return;
+  let html = '<div class="row" style="gap:10px;align-items:baseline;margin-bottom:6px"><span class="type-chip">Sentiment</span>' +
+    '<b style="font-family:var(--font-display);font-size:16px">' + esc(d.sentiment || '') + '</b></div>';
+  if (d.pulse) html += '<p class="sub">' + esc(d.pulse) + '</p>';
+  if (d.themes && d.themes.length) {
+    html += '<p class="eyebrow">Themes</p>' +
+      d.themes.map((t) => '<div style="margin-bottom:8px"><b>' + esc(t.label) + '</b> — <span class="muted">' + esc(t.summary) + '</span></div>').join('');
+  }
+  if (d.quotes && d.quotes.length) {
+    html += '<p class="eyebrow" style="margin-top:12px">Representative quotes</p><div class="responses">' +
+      d.quotes.map((q) => '<div class="response">' + esc(q) + '</div>').join('') + '</div>';
+  }
+  aiShow('✨ Response synthesis', html);
+}
+
+async function aiDraft() {
+  const topic = document.getElementById('pTopic').value.trim();
+  if (!topic) { toast('Enter a topic to draft'); return; }
+  const type = document.getElementById('pType').value;
+  const btn = document.getElementById('aiDraftBtn');
+  const label = btn.textContent; btn.textContent = '✨ …'; btn.disabled = true;
+  let res;
+  try {
+    res = await fetch('/api/ai/draft-poll', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ topic, type }) });
+  } catch { toast('Network error'); btn.textContent = label; btn.disabled = false; return; }
+  btn.textContent = label; btn.disabled = false;
+  if (res.status === 503) { toast('AI not configured'); return; }
+  if (!res.ok) { toast('Draft failed'); return; }
+  const d = await res.json().catch(() => null);
+  if (!d) return;
+  document.getElementById('pQuestion').value = d.question || '';
+  if (type === 'multiple_choice' && Array.isArray(d.options) && d.options.length) {
+    const box = document.getElementById('opts');
+    if (box) { box.innerHTML = ''; d.options.forEach((o) => addOpt(o)); }
+  }
+  if (type === 'rating') {
+    const lo = document.getElementById('labLow'); if (lo && d.scaleLabelLow) lo.value = d.scaleLabelLow;
+    const hi = document.getElementById('labHigh'); if (hi && d.scaleLabelHigh) hi.value = d.scaleLabelHigh;
+  }
+  toast('Draft ready — edit and create');
+}
+
 // ---- create poll modal ----------------------------------------------------
 function openCreate() {
   document.getElementById('modal').classList.remove('hidden');
@@ -308,10 +387,12 @@ function renderStage() {
   empty.classList.add('hidden');
   content.classList.remove('hidden');
 
+  const canSynth = poll.type === 'open_text' || poll.type === 'word_cloud';
   const head =
     '<div class="row" style="align-items:center;margin-bottom:8px">' +
     '<span class="type-chip">' + TYPE_LABEL[poll.type] + '</span>' +
     '<span class="pill right">' + poll.totalVotes + ' responses</span>' +
+    (canSynth ? '<button class="btn ghost sm" onclick="aiSynth(\'' + poll.id + '\')">✨ AI: Synthesize</button>' : '') +
     '<button class="btn ghost sm" onclick="api(\'/poll/' + poll.id + '/reset\')">Reset</button>' +
     '<button class="btn danger sm" onclick="api(\'/poll/' + poll.id + '/close\')">End</button>' +
     '</div>' +
