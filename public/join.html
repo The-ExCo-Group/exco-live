@@ -12,7 +12,7 @@
   <div class="wrap narrow">
     <div class="topbar">
       <div class="logo"><img src="/static/brand/exco-logo-white.png" alt="The ExCo Group" /><span class="product">Live</span></div>
-      <span class="pill" id="codePill"></span>
+      <span class="pill" id="namePill" style="cursor:pointer" title="Change name" onclick="editName()"></span>
     </div>
 
     <div class="tabbar">
@@ -45,6 +45,22 @@
           <span class="pill right" id="qCountP">0</span></div>
         <p class="small muted">Upvote the ones you want answered.</p>
         <div id="qaList" style="margin-top:8px"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- First-time name gate -->
+  <div id="nameModal" class="modal-bg hidden">
+    <div class="modal-card" style="max-width:420px">
+      <p class="eyebrow">Join the session</p>
+      <h2 id="nameModalTitle" style="border:0;margin:6px 0 4px">You're joining</h2>
+      <p class="sub" style="margin:0 0 8px">Add your name so the host knows who's asking. We'll remember it on this device.</p>
+      <label for="nameInput">Your name</label>
+      <input id="nameInput" type="text" placeholder="e.g. Priya Shah" maxlength="40" autocomplete="name" />
+      <div style="height:16px"></div>
+      <div class="row">
+        <button class="btn go grow" onclick="saveName()">Continue</button>
+        <button class="btn ghost" onclick="saveName(true)">Skip</button>
       </div>
     </div>
   </div>

@@ -145,6 +145,7 @@ async function persistRoom(code) {
         votes: q.votes,
         voters: [...q.voters],
         ts: q.ts,
+        author: q.author || null,
       })),
     });
   }
@@ -231,7 +232,7 @@ async function load() {
     for (const q of qRows || []) {
       const r = rooms[q.room_code];
       if (!r) continue;
-      r.questions.push({ id: q.id, text: q.text, votes: q.votes, voters: new Set(q.voters || []), ts: Number(q.ts) });
+      r.questions.push({ id: q.id, text: q.text, votes: q.votes, voters: new Set(q.voters || []), ts: Number(q.ts), author: q.author || '' });
     }
     for (const a of agRows || []) {
       agendas[a.key] = { name: a.name, polls: a.polls || [], savedAt: Date.parse(a.saved_at) || Date.now() };
@@ -288,7 +289,7 @@ async function fetchRoomDetail(code) {
   if (!r) return null;
   const [polls, questions] = await Promise.all([
     sb('GET', `/polls?room_code=eq.${code}&select=*&order=position`),
-    sb('GET', `/questions?room_code=eq.${code}&select=text,votes&order=votes.desc`),
+    sb('GET', `/questions?room_code=eq.${code}&select=text,votes,author&order=votes.desc`),
   ]);
   return {
     code: r.code,
@@ -323,11 +324,11 @@ function csvCell(v) {
 
 // Flatten a session's results into analysis-friendly CSV rows.
 function toCSV(d) {
-  const header = ['session', 'code', 'date', 'poll', 'type', 'question', 'answer', 'count', 'percent'];
+  const header = ['session', 'code', 'date', 'poll', 'type', 'question', 'answer', 'count', 'percent', 'author'];
   const rows = [header];
   const date = (d.createdAt || '').slice(0, 10);
-  const add = (poll, type, question, answer, count, percent) =>
-    rows.push([d.title, d.code, date, poll, type, question, answer, count, percent]);
+  const add = (poll, type, question, answer, count, percent, author) =>
+    rows.push([d.title, d.code, date, poll, type, question, answer, count, percent, author || '']);
 
   d.polls.forEach((p) => {
     const n = p.position + 1;
@@ -352,10 +353,10 @@ function toCSV(d) {
       p.words.forEach((w) => { const k = w.toLowerCase(); freq[k] = (freq[k] || 0) + 1; });
       Object.entries(freq).sort((a, b) => b[1] - a[1]).forEach(([w, c]) => add(n, p.type, p.question, w, c, ''));
     } else if (p.type === 'open_text') {
-      p.responses.forEach((r) => add(n, p.type, p.question, r.text, 1, ''));
+      p.responses.forEach((r) => add(n, p.type, p.question, r.text, 1, '', r.author));
     }
   });
-  d.questions.forEach((q) => add('', 'qa', 'Audience Q&A', q.text, q.votes, ''));
+  d.questions.forEach((q) => add('', 'qa', 'Audience Q&A', q.text, q.votes, '', q.author));
   return rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
 }
 
@@ -415,7 +416,7 @@ function publicRoom(r) {
       totalVotes: totalVotes(p),
     })),
     questions: r.questions
-      .map((q) => ({ id: q.id, text: q.text, votes: q.votes, ts: q.ts }))
+      .map((q) => ({ id: q.id, text: q.text, votes: q.votes, ts: q.ts, author: q.author || '' }))
       .sort((a, b) => b.votes - a.votes || a.ts - b.ts),
   };
 }
@@ -892,7 +893,7 @@ async function handleApi(req, res, seg, url) {
       if (op === 'text' && poll.type === 'open_text') {
         const t = clean(body.text, 280);
         if (t) {
-          poll.responses.push({ id: id(), text: t, ts: now() });
+          poll.responses.push({ id: id(), text: t, ts: now(), author: clean(body.author, 40) });
           if (poll.responses.length > 2000) poll.responses = poll.responses.slice(-2000);
           save(code);
           broadcast(code);
@@ -906,7 +907,7 @@ async function handleApi(req, res, seg, url) {
     if (action === 'question' && seg[3] === undefined) {
       const text = clean(body.text, 280);
       if (!text) return send(res, 400, { error: 'empty' });
-      room.questions.push({ id: id(), text, votes: 0, voters: new Set(), ts: now() });
+      room.questions.push({ id: id(), text, votes: 0, voters: new Set(), ts: now(), author: clean(body.author, 40) });
       save(code);
       broadcast(code);
       return send(res, 200, { ok: true });

@@ -389,7 +389,8 @@ function renderCloud(poll) {
 
 function renderResponses(poll) {
   if (!poll.responses.length) return '<div class="empty">Waiting for responses…</div>';
-  const cards = poll.responses.slice().reverse().map((r) => '<div class="response">' + esc(r.text) + '</div>').join('');
+  const cards = poll.responses.slice().reverse().map((r) => '<div class="response">' + esc(r.text) +
+    (r.author ? '<div class="small muted" style="margin-top:6px">— ' + esc(r.author) + '</div>' : '') + '</div>').join('');
   return '<div class="responses">' + cards + '</div>';
 }
 
@@ -399,7 +400,8 @@ function renderQA() {
   if (!state.questions.length) { board.innerHTML = '<p class="empty">Questions from the audience appear here.</p>'; return; }
   board.innerHTML = state.questions
     .map((q) => '<div class="qitem"><div class="qvote" style="cursor:default"><span class="arrow">▲</span>' + q.votes +
-      '</div><div class="qtext">' + esc(q.text) + '</div>' +
+      '</div><div class="qtext">' + esc(q.text) +
+      (q.author ? '<div class="small muted" style="margin-top:3px">— ' + esc(q.author) + '</div>' : '') + '</div>' +
       '<button class="btn ghost sm" onclick="api(\'/question/' + q.id + '/delete\')">Dismiss</button></div>')
     .join('');
 }

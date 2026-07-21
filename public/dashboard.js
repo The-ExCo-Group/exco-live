@@ -99,7 +99,9 @@ async function openDetail(code) {
   if (d.questions && d.questions.length) {
     html += '<div class="card"><p class="eyebrow">Audience Q&amp;A</p>' +
       d.questions.map((q) => '<div class="qitem"><div class="qvote" style="cursor:default"><span class="arrow">▲</span>' +
-        q.votes + '</div><div class="qtext">' + esc(q.text) + '</div></div>').join('') + '</div>';
+        q.votes + '</div><div class="qtext">' + esc(q.text) +
+        (q.author ? '<div class="small muted" style="margin-top:3px">— ' + esc(q.author) + '</div>' : '') +
+        '</div></div>').join('') + '</div>';
   }
   document.getElementById('detailBody').innerHTML = html;
 }
@@ -146,7 +148,8 @@ function renderResult(p) {
   }
   // open_text
   if (!p.responses.length) return '<p class="muted small">No responses submitted.</p>';
-  return '<div class="responses">' + p.responses.map((r) => '<div class="response">' + esc(r.text) + '</div>').join('') + '</div>';
+  return '<div class="responses">' + p.responses.map((r) => '<div class="response">' + esc(r.text) +
+    (r.author ? '<div class="small muted" style="margin-top:6px">— ' + esc(r.author) + '</div>' : '') + '</div>').join('') + '</div>';
 }
 
 function closeDetail() { document.getElementById('detailModal').classList.add('hidden'); }

@@ -12,7 +12,7 @@ services:
   - name: web
     # --- source: point this at the repo you push to ---
     github:
-      repo: kgmarexco/exco-live
+      repo: The-ExCo-Group/exco-live
       branch: main
       deploy_on_push: true
     source_dir: /

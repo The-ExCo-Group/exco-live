@@ -12,7 +12,29 @@ const done = JSON.parse(localStorage.getItem('lp_done_' + CODE) || '{}');
 function markDone(k) { done[k] = 1; localStorage.setItem('lp_done_' + CODE, JSON.stringify(done)); }
 function isDone(k) { return !!done[k]; }
 
-document.getElementById('codePill').textContent = CODE;
+// Participant name — remembered on this device across sessions.
+let NAME = localStorage.getItem('lp_name') || '';
+function renderNamePill() {
+  const p = document.getElementById('namePill');
+  if (p) p.textContent = NAME ? '☰ ' + NAME : '☰ Set name';
+}
+function saveName(skip) {
+  const v = document.getElementById('nameInput').value.trim().slice(0, 40);
+  if (!skip && v) { NAME = v; localStorage.setItem('lp_name', NAME); }
+  document.getElementById('nameModal').classList.add('hidden');
+  renderNamePill();
+}
+function editName() {
+  document.getElementById('nameInput').value = NAME;
+  document.getElementById('nameModal').classList.remove('hidden');
+  document.getElementById('nameInput').focus();
+}
+renderNamePill();
+if (!NAME) {
+  document.getElementById('nameModal').classList.remove('hidden');
+  document.getElementById('nameInput').focus();
+}
+document.getElementById('nameInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') saveName(); });
 
 function connect() {
   const es = new EventSource('/api/stream/' + CODE);
@@ -62,6 +84,8 @@ function showTab(which) {
 // ---- render ---------------------------------------------------------------
 function render() {
   if (!state) return;
+  const nt = document.getElementById('nameModalTitle');
+  if (nt) nt.textContent = state.title && state.title !== 'Untitled session' ? state.title : "You're joining";
   renderVote();
   renderQA();
 }
@@ -171,14 +195,14 @@ async function submitText(pollId) {
   const el = document.getElementById('textInput');
   const text = el.value.trim();
   if (!text) return;
-  const r = await api('/poll/' + pollId + '/text', { text });
+  const r = await api('/poll/' + pollId + '/text', { text, author: NAME });
   if (r.ok) { el.value = ''; markDone('poll_' + pollId); toast('Response sent'); }
 }
 async function askQuestion() {
   const el = document.getElementById('qInput');
   const text = el.value.trim();
   if (!text) return;
-  const r = await api('/question', { text });
+  const r = await api('/question', { text, author: NAME });
   if (r.ok) { el.value = ''; toast('Question submitted'); showTab('qa'); }
 }
 async function upvote(qid) {
@@ -203,10 +227,11 @@ function renderQA() {
   list.innerHTML = state.questions
     .map((q) => {
       const voted = isDone('q_' + q.id);
+      const by = q.author ? '<div class="small muted" style="margin-top:3px">— ' + esc(q.author) + '</div>' : '';
       return (
         '<div class="qitem"><div class="qvote ' + (voted ? 'voted' : '') + '" onclick="upvote(\'' + q.id +
         '\')"><span class="arrow">▲</span>' + q.votes + '</div>' +
-        '<div class="qtext">' + esc(q.text) + '</div></div>'
+        '<div class="qtext">' + esc(q.text) + by + '</div></div>'
       );
     })
     .join('');
