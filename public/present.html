@@ -45,6 +45,8 @@
           <div class="center" style="margin:12px 0;"><div class="qr" id="qr"></div></div>
           <div class="center code-badge" id="codeBadge2"></div>
           <p class="center small muted" id="joinLink"></p>
+          <button class="btn full sm" onclick="showJoinScreen()">⤢ Show join screen</button>
+          <div style="height:8px"></div>
           <button class="btn ghost full sm" onclick="copyLink()">Copy join link</button>
         </div>
       </div>
@@ -144,6 +146,19 @@
       <div id="agendaList"></div>
       <div style="height:8px"></div>
       <button class="btn ghost full" onclick="closeModal('loadModal')">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Fullscreen join screen — big QR for the room to scan -->
+  <div id="joinScreen" class="join-screen hidden" onclick="if(event.target===this)hideJoinScreen()">
+    <button class="js-close" onclick="hideJoinScreen()" aria-label="Close join screen">Close <span class="js-esc">Esc</span></button>
+    <div class="js-inner">
+      <div class="js-brand"><img src="/static/brand/exco-logo-white.png" alt="The ExCo Group" /><span class="product">Live</span></div>
+      <p class="js-kicker">Scan to join</p>
+      <div class="js-qr" id="joinScreenQr"></div>
+      <div class="js-code code-badge" id="joinScreenCode"></div>
+      <p class="js-url" id="joinScreenUrl"></p>
+      <p class="js-hint">Point your phone camera at the code — no app, no login.</p>
     </div>
   </div>
 

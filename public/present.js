@@ -35,6 +35,22 @@ function toast(msg) {
 }
 function copyLink() { navigator.clipboard.writeText(joinUrl).then(() => toast('Join link copied')); }
 
+// ---- fullscreen join screen (big QR for the room to scan) -----------------
+let joinScreenReady = false;
+function showJoinScreen() {
+  document.getElementById('joinScreenCode').textContent = CODE;
+  document.getElementById('joinScreenUrl').textContent = joinUrl;
+  if (!joinScreenReady && window.QR) {
+    QR.render(document.getElementById('joinScreenQr'), joinUrl, { size: 560 });
+    joinScreenReady = true;
+  }
+  document.getElementById('joinScreen').classList.remove('hidden');
+}
+function hideJoinScreen() { document.getElementById('joinScreen').classList.add('hidden'); }
+function toggleJoinScreen() {
+  document.getElementById('joinScreen').classList.contains('hidden') ? showJoinScreen() : hideJoinScreen();
+}
+
 const TYPE_LABEL = {
   multiple_choice: 'Multiple choice', word_cloud: 'Word cloud', rating: 'Rating', open_text: 'Open text',
 };
@@ -201,7 +217,9 @@ async function step(dir) {
 document.addEventListener('keydown', (e) => {
   const tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+  if (e.key === 'Escape') { hideJoinScreen(); return; }
   if (document.querySelector('.modal-bg:not(.hidden)')) return;
+  if (e.key === 'j' || e.key === 'J') { e.preventDefault(); toggleJoinScreen(); return; }
   if (e.key === 'ArrowRight') { e.preventDefault(); step(1); }
   if (e.key === 'ArrowLeft') { e.preventDefault(); step(-1); }
 });

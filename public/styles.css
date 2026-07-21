@@ -220,3 +220,20 @@ hr.divider { height: 1px; background: var(--line); margin: 22px 0; border: 0; }
 
 .help { font-family: var(--font-body); font-size: 13px; color: var(--muted); background: var(--surface-2); border-radius: var(--radius); padding: 12px 14px; white-space: pre-wrap; line-height: 1.6; }
 code { font-family: ui-monospace, Menlo, monospace; font-size: 0.92em; background: var(--surface-2); padding: 1px 5px; border-radius: 3px; }
+
+/* ---- Fullscreen join screen (audience scans the QR) ---- */
+.join-screen { position: fixed; inset: 0; z-index: 60; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 24px; text-align: center; animation: fade var(--dur) var(--ease); }
+.join-screen::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--gradient); }
+.js-close { position: absolute; top: 22px; right: 24px; background: transparent; border: 1px solid var(--line-strong); color: var(--muted); border-radius: var(--radius); padding: 9px 14px; font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 9px; transition: color var(--dur) var(--ease), border-color var(--dur) var(--ease); }
+.js-close:hover { color: var(--text); border-color: var(--text); }
+.js-close .js-esc { border: 1px solid var(--line-strong); border-radius: 3px; padding: 1px 6px; font-size: 10px; color: var(--muted); }
+.js-inner { display: flex; flex-direction: column; align-items: center; }
+.js-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; opacity: 0.9; }
+.js-brand img { height: 30px; width: auto; }
+.js-brand .product { font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: var(--eyebrow-track); font-size: 12px; color: var(--muted); padding-left: 12px; border-left: 1px solid var(--line-strong); }
+.js-kicker { font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: var(--eyebrow-track); font-size: clamp(13px, 1.5vw, 17px); color: var(--muted); margin: 0 0 24px; }
+.js-qr { background: #fff; padding: 22px; border-radius: 8px; display: inline-block; line-height: 0; box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5); }
+.js-qr svg { display: block; width: clamp(220px, 44vh, 520px); height: auto; }
+.js-code { margin: 30px 0 10px; font-size: clamp(46px, 8.5vw, 108px); }
+.js-url { color: var(--muted); font-size: clamp(15px, 1.8vw, 20px); margin: 0 0 22px; word-break: break-all; }
+.js-hint { color: var(--muted-2); font-size: clamp(13px, 1.4vw, 16px); margin: 0; }
