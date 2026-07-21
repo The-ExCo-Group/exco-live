@@ -25,5 +25,16 @@ services:
     envs:
       - key: NODE_ENV
         value: production
+      # --- Supabase (durable store) ---
+      # The server persists rooms/polls/votes/Q&A here so state survives
+      # redeploys and past events stay queryable. SUPABASE_KEY is the
+      # publishable key (safe to store; the server is the only DB client).
+      # NOTE: editing this file does NOT push env vars to a running App
+      # Platform app — also set these in the DO dashboard (App > Settings >
+      # web > Environment Variables) or run `doctl apps update --spec`.
+      - key: SUPABASE_URL
+        value: https://hstnpuwbjtemdzbezvzw.supabase.co
+      - key: SUPABASE_KEY
+        value: sb_publishable_ThtnFIrDyLBRWEtKFSbn7g_OSVsQVOz
     health_check:
       http_path: /healthz

@@ -7,18 +7,23 @@
 'use strict';
 
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
-// DATA_DIR lets the host point persistence at a writable/mounted path.
-// Defaults to the app dir. NOTE: on DigitalOcean App Platform the container
-// filesystem is ephemeral (state resets on redeploy/restart) — fine for
-// per-event sessions; use a managed DB/Spaces if agendas must survive redeploys.
-const DATA_DIR = process.env.DATA_DIR || __dirname;
-const DATA_FILE = path.join(DATA_DIR, 'data.json');
+
+// --- Supabase (durable store) ---------------------------------------------
+// The Node server is the ONLY Supabase client — browsers talk to this server,
+// never to Supabase directly — so the key lives only in the server env.
+// Configure via env: SUPABASE_URL + SUPABASE_KEY (the publishable key).
+// If either is unset the app runs in-memory only (no persistence); handy for
+// local dev and a safe fallback if the DB is unreachable.
+const SUPABASE_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
+const SB_ENABLED = !!(SUPABASE_URL && SUPABASE_KEY);
 
 // ---------------------------------------------------------------------------
 // State
@@ -46,60 +51,194 @@ const clients = new Map();
 
 // Reusable agenda templates (a saved run of show), keyed by lowercased name.
 // agendas[key] = { name, polls: [ pollDef ], savedAt }
-const AGENDA_FILE = path.join(DATA_DIR, 'agendas.json');
 const agendas = Object.create(null);
 
 // ---------------------------------------------------------------------------
-// Persistence (best-effort, prototype-grade)
+// Persistence — Supabase Postgres via its REST API (no npm dependency).
+// In-memory stays the live/realtime layer; Supabase is the durable source of
+// truth so state survives redeploys and past events stay queryable.
 // ---------------------------------------------------------------------------
-function serialize() {
-  const out = {};
-  for (const code of Object.keys(rooms)) {
-    const r = rooms[code];
-    out[code] = {
-      ...r,
-      questions: r.questions.map((q) => ({ ...q, voters: [...q.voters] })),
-    };
-  }
-  return JSON.stringify(out);
-}
 
-let saveTimer = null;
-function save() {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    fs.writeFile(DATA_FILE, serialize(), () => {});
-  }, 150);
-}
-
-function load() {
-  try {
-    const raw = fs.readFileSync(DATA_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
-    for (const code of Object.keys(parsed)) {
-      const r = parsed[code];
-      r.questions = (r.questions || []).map((q) => ({
-        ...q,
-        voters: new Set(q.voters || []),
-      }));
-      rooms[code] = r;
+// Minimal PostgREST client over Node's built-in https.
+function sb(method, pathAndQuery, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(SUPABASE_URL + '/rest/v1' + pathAndQuery);
+    const payload = opts.body != null ? JSON.stringify(opts.body) : null;
+    const headers = { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY };
+    if (payload) {
+      headers['Content-Type'] = 'application/json';
+      headers['Content-Length'] = Buffer.byteLength(payload);
     }
-    console.log(`Loaded ${Object.keys(rooms).length} room(s) from disk.`);
-  } catch {
-    /* no data file yet */
+    if (opts.prefer) headers.Prefer = opts.prefer;
+    const req = https.request(url, { method, headers }, (res) => {
+      let data = '';
+      res.on('data', (c) => (data += c));
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try { resolve(data ? JSON.parse(data) : null); } catch { resolve(null); }
+        } else {
+          reject(new Error(`supabase ${method} ${pathAndQuery} -> ${res.statusCode}: ${data.slice(0, 300)}`));
+        }
+      });
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+const iso = (ms) => new Date(ms || Date.now()).toISOString();
+// PostgREST in-list of text ids (our ids are hex/alnum, so no quoting needed).
+const inList = (ids) => `(${ids.join(',')})`;
+
+// Write one room's full state through to Supabase (upsert rows, prune removals).
+async function persistRoom(code) {
+  const r = rooms[code];
+  if (!r) {
+    // Room gone from memory — remove it (ON DELETE CASCADE clears children).
+    await sb('DELETE', `/rooms?code=eq.${code}`);
+    return;
+  }
+  await sb('POST', '/rooms', {
+    prefer: 'resolution=merge-duplicates,return=minimal',
+    body: [{
+      code: r.code,
+      title: r.title,
+      active_poll_id: r.activePollId,
+      created_at: iso(r.createdAt),
+      updated_at: iso(),
+    }],
+  });
+
+  if (r.polls.length) {
+    await sb('POST', '/polls', {
+      prefer: 'resolution=merge-duplicates,return=minimal',
+      body: r.polls.map((p, i) => ({
+        id: p.id,
+        room_code: code,
+        position: i,
+        type: p.type,
+        question: p.question,
+        state: p.state,
+        options: p.options || [],
+        scale_max: p.scaleMax,
+        scale_label_low: p.scaleLabelLow,
+        scale_label_high: p.scaleLabelHigh,
+        votes: p.votes || {},
+        words: p.words || [],
+        ratings: p.ratings || [],
+        responses: p.responses || [],
+        total_votes: totalVotes(p),
+      })),
+    });
+  }
+  const pollIds = r.polls.map((p) => p.id);
+  await sb('DELETE', `/polls?room_code=eq.${code}` + (pollIds.length ? `&id=not.in.${inList(pollIds)}` : ''));
+
+  if (r.questions.length) {
+    await sb('POST', '/questions', {
+      prefer: 'resolution=merge-duplicates,return=minimal',
+      body: r.questions.map((q) => ({
+        id: q.id,
+        room_code: code,
+        text: q.text,
+        votes: q.votes,
+        voters: [...q.voters],
+        ts: q.ts,
+      })),
+    });
+  }
+  const qIds = r.questions.map((q) => q.id);
+  await sb('DELETE', `/questions?room_code=eq.${code}` + (qIds.length ? `&id=not.in.${inList(qIds)}` : ''));
+}
+
+// Debounced, per-room write-through. Fire-and-forget from request handlers.
+const dirty = new Set();
+let saveTimer = null;
+function save(code) {
+  if (!SB_ENABLED) return;
+  if (code) dirty.add(code);
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(flush, 150);
+}
+async function flush() {
+  const codes = [...dirty];
+  dirty.clear();
+  for (const code of codes) {
+    try { await persistRoom(code); }
+    catch (e) { console.error('persist room', code, 'failed:', e.message); }
   }
 }
 
-function saveAgendas() {
-  fs.writeFile(AGENDA_FILE, JSON.stringify(agendas), () => {});
-}
-function loadAgendas() {
+async function saveAgenda(key) {
+  if (!SB_ENABLED) return;
+  const a = agendas[key];
+  if (!a) return;
   try {
-    const parsed = JSON.parse(fs.readFileSync(AGENDA_FILE, 'utf8'));
-    for (const k of Object.keys(parsed)) agendas[k] = parsed[k];
-    console.log(`Loaded ${Object.keys(agendas).length} agenda template(s).`);
-  } catch {
-    /* none yet */
+    await sb('POST', '/agendas', {
+      prefer: 'resolution=merge-duplicates,return=minimal',
+      body: [{ key, name: a.name, polls: a.polls, saved_at: iso(a.savedAt) }],
+    });
+  } catch (e) { console.error('persist agenda', key, 'failed:', e.message); }
+}
+async function deleteAgenda(key) {
+  if (!SB_ENABLED) return;
+  try { await sb('DELETE', `/agendas?key=eq.${encodeURIComponent(key)}`); }
+  catch (e) { console.error('delete agenda', key, 'failed:', e.message); }
+}
+
+// Load all state from Supabase into memory on boot.
+async function load() {
+  if (!SB_ENABLED) {
+    console.log('Supabase not configured (SUPABASE_URL / SUPABASE_KEY) — running in-memory only, no persistence.');
+    return;
+  }
+  try {
+    const [roomRows, pollRows, qRows, agRows] = await Promise.all([
+      sb('GET', '/rooms?select=*'),
+      sb('GET', '/polls?select=*&order=room_code,position'),
+      sb('GET', '/questions?select=*&order=ts'),
+      sb('GET', '/agendas?select=*'),
+    ]);
+    for (const rr of roomRows || []) {
+      rooms[rr.code] = {
+        code: rr.code,
+        title: rr.title,
+        createdAt: Date.parse(rr.created_at) || Date.now(),
+        activePollId: rr.active_poll_id || null,
+        polls: [],
+        questions: [],
+      };
+    }
+    for (const p of pollRows || []) {
+      const r = rooms[p.room_code];
+      if (!r) continue;
+      r.polls.push({
+        id: p.id,
+        type: p.type,
+        question: p.question,
+        state: p.state,
+        options: p.options || [],
+        scaleMax: p.scale_max,
+        scaleLabelLow: p.scale_label_low,
+        scaleLabelHigh: p.scale_label_high,
+        votes: p.votes || {},
+        words: p.words || [],
+        ratings: p.ratings || [],
+        responses: p.responses || [],
+      });
+    }
+    for (const q of qRows || []) {
+      const r = rooms[q.room_code];
+      if (!r) continue;
+      r.questions.push({ id: q.id, text: q.text, votes: q.votes, voters: new Set(q.voters || []), ts: Number(q.ts) });
+    }
+    for (const a of agRows || []) {
+      agendas[a.key] = { name: a.name, polls: a.polls || [], savedAt: Date.parse(a.saved_at) || Date.now() };
+    }
+    console.log(`Loaded ${Object.keys(rooms).length} room(s) and ${Object.keys(agendas).length} agenda(s) from Supabase.`);
+  } catch (e) {
+    console.error('Supabase load failed — starting with empty state:', e.message);
   }
 }
 
@@ -361,7 +500,7 @@ async function handleApi(req, res, seg, url) {
       activePollId: null,
       questions: [],
     };
-    save();
+    save(code);
     return send(res, 200, { code });
   }
 
@@ -388,13 +527,15 @@ async function handleApi(req, res, seg, url) {
     if (!polls || !polls.length) return send(res, 400, { error: 'no_polls' });
     // sanitize through makePoll then back to defs so stored data is clean
     const defs = pollsToDefs(polls.map((d) => makePoll(d)));
-    agendas[name.toLowerCase()] = { name, polls: defs, savedAt: now() };
-    saveAgendas();
+    const key = name.toLowerCase();
+    agendas[key] = { name, polls: defs, savedAt: now() };
+    saveAgenda(key);
     return send(res, 200, { ok: true, name, count: defs.length });
   }
   if (seg[0] === 'agenda' && seg[1] && seg[2] === 'delete' && req.method === 'POST') {
-    delete agendas[decodeURIComponent(seg[1]).toLowerCase()];
-    saveAgendas();
+    const key = decodeURIComponent(seg[1]).toLowerCase();
+    delete agendas[key];
+    deleteAgenda(key);
     return send(res, 200, { ok: true });
   }
 
@@ -449,7 +590,7 @@ async function handleApi(req, res, seg, url) {
     if (action === 'poll' && seg[3] === undefined) {
       const poll = makePoll(body);
       room.polls.push(poll);
-      save();
+      save(code);
       broadcast(code);
       return send(res, 200, { id: poll.id });
     }
@@ -464,7 +605,7 @@ async function handleApi(req, res, seg, url) {
       }
       const created = defs.map((d) => makePoll(d));
       room.polls.push(...created);
-      save();
+      save(code);
       broadcast(code);
       return send(res, 200, { ids: created.map((p) => p.id), count: created.length });
     }
@@ -476,7 +617,7 @@ async function handleApi(req, res, seg, url) {
       if (!ag) return send(res, 404, { error: 'agenda_not_found' });
       const created = ag.polls.map((d) => makePoll(d));
       room.polls.push(...created);
-      save();
+      save(code);
       broadcast(code);
       return send(res, 200, { count: created.length });
     }
@@ -491,21 +632,21 @@ async function handleApi(req, res, seg, url) {
         for (const p of room.polls) if (p.state === 'active') p.state = 'closed';
         poll.state = 'active';
         room.activePollId = poll.id;
-        save();
+        save(code);
         broadcast(code);
         return send(res, 200, { ok: true });
       }
       if (op === 'close') {
         poll.state = 'closed';
         if (room.activePollId === poll.id) room.activePollId = null;
-        save();
+        save(code);
         broadcast(code);
         return send(res, 200, { ok: true });
       }
       if (op === 'delete') {
         room.polls = room.polls.filter((p) => p.id !== poll.id);
         if (room.activePollId === poll.id) room.activePollId = null;
-        save();
+        save(code);
         broadcast(code);
         return send(res, 200, { ok: true });
       }
@@ -514,7 +655,7 @@ async function handleApi(req, res, seg, url) {
         const j = body.dir === 'up' ? i - 1 : i + 1;
         if (i >= 0 && j >= 0 && j < room.polls.length) {
           [room.polls[i], room.polls[j]] = [room.polls[j], room.polls[i]];
-          save();
+          save(code);
           broadcast(code);
         }
         return send(res, 200, { ok: true });
@@ -525,7 +666,7 @@ async function handleApi(req, res, seg, url) {
         poll.words = [];
         poll.ratings = [];
         poll.responses = [];
-        save();
+        save(code);
         broadcast(code);
         return send(res, 200, { ok: true });
       }
@@ -537,7 +678,7 @@ async function handleApi(req, res, seg, url) {
       if (op === 'vote' && poll.type === 'multiple_choice') {
         if (Object.prototype.hasOwnProperty.call(poll.votes, body.optionId)) {
           poll.votes[body.optionId]++;
-          save();
+          save(code);
           broadcast(code);
           return send(res, 200, { ok: true });
         }
@@ -551,7 +692,7 @@ async function handleApi(req, res, seg, url) {
           .slice(0, 5);
         for (const w of words) poll.words.push(w);
         if (poll.words.length > 5000) poll.words = poll.words.slice(-5000);
-        save();
+        save(code);
         broadcast(code);
         return send(res, 200, { ok: true });
       }
@@ -559,7 +700,7 @@ async function handleApi(req, res, seg, url) {
         const v = parseInt(body.value, 10);
         if (v >= 1 && v <= poll.scaleMax) {
           poll.ratings.push(v);
-          save();
+          save(code);
           broadcast(code);
           return send(res, 200, { ok: true });
         }
@@ -570,7 +711,7 @@ async function handleApi(req, res, seg, url) {
         if (t) {
           poll.responses.push({ id: id(), text: t, ts: now() });
           if (poll.responses.length > 2000) poll.responses = poll.responses.slice(-2000);
-          save();
+          save(code);
           broadcast(code);
           return send(res, 200, { ok: true });
         }
@@ -583,7 +724,7 @@ async function handleApi(req, res, seg, url) {
       const text = clean(body.text, 280);
       if (!text) return send(res, 400, { error: 'empty' });
       room.questions.push({ id: id(), text, votes: 0, voters: new Set(), ts: now() });
-      save();
+      save(code);
       broadcast(code);
       return send(res, 200, { ok: true });
     }
@@ -595,14 +736,14 @@ async function handleApi(req, res, seg, url) {
         if (!q.voters.has(voter)) {
           q.voters.add(voter);
           q.votes++;
-          save();
+          save(code);
           broadcast(code);
         }
         return send(res, 200, { ok: true });
       }
       if (seg[4] === 'delete') {
         room.questions = room.questions.filter((x) => x.id !== q.id);
-        save();
+        save(code);
         broadcast(code);
         return send(res, 200, { ok: true });
       }
@@ -612,8 +753,10 @@ async function handleApi(req, res, seg, url) {
   return notFound(res);
 }
 
-load();
-loadAgendas();
-server.listen(PORT, () => {
-  console.log(`\n  Live Polls running:  http://localhost:${PORT}\n`);
+// Load persisted state (if any), then start serving. `.finally` ensures the
+// server still comes up even if Supabase is unreachable at boot.
+load().finally(() => {
+  server.listen(PORT, () => {
+    console.log(`\n  Live Polls running:  http://localhost:${PORT}\n`);
+  });
 });

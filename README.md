@@ -38,10 +38,12 @@ broadcast), so it deploys to App Platform as one **web service, single instance*
 4. **Custom domain.** Add e.g. `live.excoleadership.com` in the app's Settings → Domains,
    then add the CNAME it gives you to DNS. TLS is automatic.
 
-**Persistence caveat:** App Platform containers have an *ephemeral* filesystem, so saved
-sessions and agenda templates reset on each redeploy/restart. That's fine for per-event
-polls, but if reusable agendas must survive redeploys, add a small **DO Managed Postgres**
-(or Spaces) and I'll wire the store to it — set `DATA_DIR` or a DB URL via app env vars.
+**Persistence:** State is stored durably in **Supabase Postgres**, so sessions, poll
+results, Q&A, and agenda templates survive redeploys/restarts and past events stay
+queryable for analysis. In-memory state remains the live/realtime layer; every change
+writes through to Supabase, and the server reloads from it on boot. Configure via two
+env vars — `SUPABASE_URL` and `SUPABASE_KEY` (the publishable key). If they're unset the
+app runs in-memory only (no persistence), which is a safe fallback for local dev.
 
 ## Preloading questions (seamless event presenting)
 
@@ -106,6 +108,15 @@ node server.js
 
 Set a different port with `PORT=8080 node server.js`.
 
+To persist to Supabase locally, set the two env vars first (otherwise it runs
+in-memory only):
+
+```bash
+export SUPABASE_URL="https://<project>.supabase.co"
+export SUPABASE_KEY="sb_publishable_..."
+node server.js
+```
+
 ## Use it
 
 1. Open `http://localhost:3000`, give the session a title, click **Create session**.
@@ -122,7 +133,7 @@ Set a different port with `PORT=8080 node server.js`.
 
 | File | Role |
 |------|------|
-| `server.js` | HTTP + SSE server, in-memory room state, JSON persistence to `data.json` |
+| `server.js` | HTTP + SSE server, in-memory room state, write-through persistence to Supabase Postgres (via its REST API) |
 | `public/index.html` | Landing (create / join) |
 | `public/present.html` + `present.js` | Presenter console & live stage |
 | `public/join.html` + `join.js` | Participant app |
@@ -130,8 +141,9 @@ Set a different port with `PORT=8080 node server.js`.
 | `public/styles.css` | ExCo visual system (tokens, fonts, components) |
 | `public/fonts/`, `public/brand/` | ExCo web fonts, logo lockups, favicon |
 
-State is held in memory and mirrored to `data.json` so a restart doesn't lose a session.
-Agenda templates persist separately in `agendas.json`.
+State is held in memory for fast realtime fan-out and written through to Supabase
+Postgres (tables: `rooms`, `polls`, `questions`, `agendas`), so a restart or redeploy
+doesn't lose a session and past events can be queried for analysis.
 
 ## Prototype notes / next steps
 
