@@ -58,13 +58,31 @@ function showEnded() {
   if (tb) tb.classList.add('hidden');
 }
 
+// Submission id: device + time + randomness, so two people (or two taps) never collide.
+function newSid() {
+  return ME + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+}
+
 async function api(pathSuffix, body) {
-  const res = await fetch('/api/room/' + CODE + pathSuffix, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body || {}),
-  });
-  return res;
+  // The sid is minted once, outside the retry loop: every retry of this one submission must carry
+  // the SAME sid so the server's de-dupe counts it once. Minting it per attempt would double-count.
+  const payload = JSON.stringify(Object.assign({}, body || {}, { sid: newSid() }));
+  const url = '/api/room/' + CODE + pathSuffix;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+      });
+      // 4xx is the server's real verdict — resending won't change it. Only 5xx is worth another go.
+      if (res.status < 500) return res;
+    } catch (e) {
+      // Network dropped (flaky conference wifi) — fall through and try again.
+    }
+    if (attempt < 2) await new Promise((r) => setTimeout(r, 300 * (attempt + 1) + Math.random() * 200));
+  }
+  return { ok: false, status: 0 }; // shaped like a failed Response; callers only read .ok
 }
 
 function toast(msg) {
@@ -172,17 +190,27 @@ function refreshVoteState(poll) {
 }
 
 // ---- actions --------------------------------------------------------------
+// isDone is only set once the POST lands, and a retry can keep that quiet for
+// over a second — long enough for an impatient second tap, which mints a second
+// sid the server counts as a second person. One submission in flight per poll.
+const inFlight = {};
 async function vote(pollId, optionId, el) {
-  if (isDone('poll_' + pollId)) return;
+  if (isDone('poll_' + pollId) || inFlight[pollId]) return;
+  inFlight[pollId] = 1;
   if (el) el.classList.add('chosen');
-  const r = await api('/poll/' + pollId + '/vote', { optionId });
-  if (r.ok) { markDone('poll_' + pollId); refreshVoteState(currentPoll()); toast('Vote counted'); }
+  try {
+    const r = await api('/poll/' + pollId + '/vote', { optionId });
+    if (r.ok) { markDone('poll_' + pollId); refreshVoteState(currentPoll()); toast('Vote counted'); }
+  } finally { delete inFlight[pollId]; }
 }
 async function rate(pollId, value, el) {
-  if (isDone('poll_' + pollId)) return;
+  if (isDone('poll_' + pollId) || inFlight[pollId]) return;
+  inFlight[pollId] = 1;
   if (el) el.classList.add('chosen');
-  const r = await api('/poll/' + pollId + '/rate', { value });
-  if (r.ok) { markDone('poll_' + pollId); refreshVoteState(currentPoll()); toast('Rating sent'); }
+  try {
+    const r = await api('/poll/' + pollId + '/rate', { value });
+    if (r.ok) { markDone('poll_' + pollId); refreshVoteState(currentPoll()); toast('Rating sent'); }
+  } finally { delete inFlight[pollId]; }
 }
 async function submitWord(pollId) {
   const el = document.getElementById('wordInput');

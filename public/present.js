@@ -12,7 +12,8 @@ document.getElementById('joinLink').textContent = joinUrl;
 if (window.QR) QR.render(document.getElementById('qr'), joinUrl, { size: 168 });
 
 function connect() {
-  const es = new EventSource('/api/stream/' + CODE);
+  // stage view: the console renders every response, so it needs the full room payload — participants get a slim private one
+  const es = new EventSource('/api/stream/' + CODE + '?view=stage');
   es.onmessage = (e) => {
     const d = JSON.parse(e.data);
     if (d.ended) { showEnded(); es.close(); return; }
@@ -92,13 +93,27 @@ function aiNotConfigured() {
   return '<div class="card tint"><p class="eyebrow">AI not configured</p>' +
     '<p class="muted" style="margin:0">Set the <code>ANTHROPIC_API_KEY</code> environment variable on the server to turn on AI features.</p></div>';
 }
+// A 503 means either "no API key" or "the AI queue shed this call" — very different
+// remedies, so read the body rather than guessing from the status alone.
+async function aiBusyMessage(res) {
+  const d = await res.json().catch(() => null);
+  if (d && d.error === 'busy') {
+    const s = d.retryAfterSeconds || Number(res.headers.get('Retry-After')) || 20;
+    return 'AI is busy right now — try again in about ' + s + 's.';
+  }
+  return null;
+}
 async function aiCall(title, path, body) {
   aiShow(title, '<p class="empty">Thinking…</p>');
   let res;
   try {
     res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
   } catch { aiShow(title, '<p class="empty">Network error — try again.</p>'); return null; }
-  if (res.status === 503) { aiShow(title, aiNotConfigured()); return null; }
+  if (res.status === 503) {
+    const busy = await aiBusyMessage(res);
+    aiShow(title, busy ? '<p class="empty">' + esc(busy) + '</p>' : aiNotConfigured());
+    return null;
+  }
   if (!res.ok) { aiShow(title, '<p class="empty">AI request failed — try again.</p>'); return null; }
   return res.json().catch(() => null);
 }
@@ -145,7 +160,7 @@ async function aiDraft() {
     res = await fetch('/api/ai/draft-poll', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ topic, type }) });
   } catch { toast('Network error'); btn.textContent = label; btn.disabled = false; return; }
   btn.textContent = label; btn.disabled = false;
-  if (res.status === 503) { toast('AI not configured'); return; }
+  if (res.status === 503) { toast((await aiBusyMessage(res)) || 'AI not configured'); return; }
   if (!res.ok) { toast('Draft failed'); return; }
   const d = await res.json().catch(() => null);
   if (!d) return;

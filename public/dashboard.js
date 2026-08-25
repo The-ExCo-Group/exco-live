@@ -31,12 +31,49 @@ function aiNotConfigured() {
   return '<div class="card tint"><p class="eyebrow">AI not configured</p>' +
     '<p class="muted" style="margin:0">Set the <code>ANTHROPIC_API_KEY</code> environment variable on the server to turn on AI features.</p></div>';
 }
+function plural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
+// Refusal card. The gate fires either server-side (message + stats) or from the
+// model itself (dataNotes, no message), so both origins land here.
+function aiInsufficient(d) {
+  const s = d.stats || {};
+  const msg = d.message || d.dataNotes ||
+    'There is not enough captured data here to report on yet. Collect some responses, then try again.';
+  let counts = '';
+  if (s.sessions != null) counts = 'Checked ' + plural(s.sessions, 'session') + ' · ' + (s.answeredSessions || 0) + ' with responses';
+  else if (s.polls != null || s.responses != null || s.questions != null) {
+    counts = plural(s.polls || 0, 'poll') + ' · ' + plural(s.responses || 0, 'response') +
+      ' · ' + plural(s.questions || 0, 'audience question');
+  }
+  return '<div class="card tint"><p class="eyebrow">Answers needed</p>' +
+    '<p class="muted" style="margin:0">' + esc(msg) + '</p>' +
+    (counts ? '<p class="muted small" style="margin:8px 0 0">' + esc(counts) + '</p>' : '') + '</div>';
+}
+// bullets() renders an em-dash for an empty array, which reads as a broken render
+// rather than "nothing to report" — so drop the whole section instead.
+function aiSection(label, arr) {
+  if (!arr || !arr.length) return '';
+  return '<p class="eyebrow" style="margin-top:14px">' + label + '</p>' + bullets(arr);
+}
+// A 503 means either "no API key" or "the AI queue shed this call" — very different
+// remedies, so read the body rather than guessing from the status alone.
+async function aiBusyMessage(res) {
+  const d = await res.json().catch(() => null);
+  if (d && d.error === 'busy') {
+    const s = d.retryAfterSeconds || Number(res.headers.get('Retry-After')) || 20;
+    return 'AI is busy right now — try again in about ' + s + 's.';
+  }
+  return null;
+}
 async function aiCall(title, path) {
   aiShow(title, '<p class="empty">Thinking…</p>');
   let res;
   try { res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); }
   catch { aiShow(title, '<p class="empty">Network error — try again.</p>'); return null; }
-  if (res.status === 503) { aiShow(title, aiNotConfigured()); return null; }
+  if (res.status === 503) {
+    const busy = await aiBusyMessage(res);
+    aiShow(title, busy ? '<p class="empty">' + esc(busy) + '</p>' : aiNotConfigured());
+    return null;
+  }
   if (!res.ok) { aiShow(title, '<p class="empty">AI request failed — try again.</p>'); return null; }
   return res.json().catch(() => null);
 }
@@ -46,24 +83,34 @@ function bullets(arr) {
 async function aiDebrief(code) {
   const d = await aiCall('Session debrief', '/api/room/' + code + '/ai/debrief');
   if (!d) return;
+  if (d.insufficientData) { aiShow('Session debrief', aiInsufficient(d)); return; }
   let html = '<h2 style="margin:0 0 6px">' + esc(d.headline || '') + '</h2>';
   html += '<p class="sub">' + esc(d.summary || '') + '</p>';
-  html += '<p class="eyebrow" style="margin-top:14px">Poll takeaways</p>' + bullets(d.pollTakeaways);
-  html += '<p class="eyebrow" style="margin-top:14px">Q&amp;A themes</p>' + bullets(d.qaThemes);
-  html += '<p class="eyebrow" style="margin-top:14px">Notable quotes</p>' + bullets(d.quotes);
-  html += '<p class="eyebrow" style="margin-top:14px">Recommended follow-ups</p>' + bullets(d.followUps);
+  html += aiSection('Poll takeaways', d.pollTakeaways);
+  html += aiSection('Q&amp;A themes', d.qaThemes);
+  html += aiSection('Notable quotes', d.quotes);
+  html += aiSection('Recommended follow-ups', d.followUps);
+  // Keep the denominator in front of the reader so a thin debrief reads as thin.
+  if (d.stats) {
+    html += '<p class="muted small" style="margin-top:18px">Built from ' + plural(d.stats.responses || 0, 'response') +
+      ' across ' + plural(d.stats.polls || 0, 'poll') + ' and ' + plural(d.stats.questions || 0, 'audience question') + '.</p>';
+  }
   aiShow('Session debrief', html);
 }
 async function aiTrends() {
   const d = await aiCall('Cross-event trends', '/api/ai/trends');
   if (!d) return;
+  if (d.insufficientData) { aiShow('Cross-event trends', aiInsufficient(d)); return; }
   let html = '<p class="sub">' + esc(d.summary || '') + '</p>';
   if (d.trends && d.trends.length) {
     html += '<p class="eyebrow">Trends</p>' + d.trends.map((t) =>
       '<div class="card" style="margin-bottom:12px"><b style="font-family:var(--font-display);font-size:16px">' + esc(t.title) + '</b>' +
-      '<p class="small" style="margin:6px 0 0">' + esc(t.detail) + '</p></div>').join('');
+      '<p class="small" style="margin:6px 0 0">' + esc(t.detail) + '</p>' +
+      // Naming the sessions behind a trend makes a one-session "trend" self-evident.
+      ((t.sessions && t.sessions.length) ? '<p class="muted small" style="margin:6px 0 0">From: ' + esc(t.sessions.join(', ')) + '</p>' : '') +
+      '</div>').join('');
   }
-  html += '<p class="eyebrow" style="margin-top:8px">Recommendations</p>' + bullets(d.recommendations);
+  html += aiSection('Recommendations', d.recommendations);
   aiShow('Cross-event trends', html);
 }
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') document.getElementById('aiModal').classList.add('hidden'); });
