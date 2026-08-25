@@ -54,14 +54,15 @@
     <div class="modal-card" style="max-width:420px">
       <p class="eyebrow">Join the session</p>
       <h2 id="nameModalTitle" style="border:0;margin:6px 0 4px">You're joining</h2>
-      <p class="sub" style="margin:0 0 8px">Add your name so the host knows who's asking. We'll remember it on this device.</p>
-      <label for="nameInput">Your name</label>
+      <p class="sub" style="margin:0 0 8px">Add your name so the host knows who's asking, or answer anonymously — your choice is remembered on this device.</p>
+      <label for="nameInput">Your name <span class="muted" style="text-transform:none;letter-spacing:0">(optional)</span></label>
       <input id="nameInput" type="text" placeholder="e.g. Priya Shah" maxlength="40" autocomplete="name" />
       <div style="height:16px"></div>
       <div class="row">
         <button class="btn go grow" onclick="saveName()">Continue</button>
-        <button class="btn ghost" onclick="saveName(true)">Skip</button>
+        <button class="btn ghost" id="anonBtn" onclick="goAnonymous()">Stay anonymous</button>
       </div>
+      <p class="small muted" style="margin:12px 0 0">Anonymous answers are never linked to you — no name is stored or sent.</p>
     </div>
   </div>
 

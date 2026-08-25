@@ -14,25 +14,43 @@ const done = JSON.parse(localStorage.getItem('lp_done_' + CODE) || '{}');
 function markDone(k, v) { done[k] = v || 1; localStorage.setItem('lp_done_' + CODE, JSON.stringify(done)); }
 function isDone(k) { return !!done[k]; }
 
-// Participant name — remembered on this device across sessions.
+// Participant name — remembered on this device across sessions. Answering
+// anonymously is a first-class choice, not a fallback: ANON records that the
+// participant chose it, so we stop asking. Without that flag an empty name is
+// indistinguishable from "hasn't decided yet" and the modal reopens every load.
 let NAME = localStorage.getItem('lp_name') || '';
+let ANON = localStorage.getItem('lp_anon') === '1';
 function renderNamePill() {
   const p = document.getElementById('namePill');
-  if (p) p.textContent = NAME ? '☰ ' + NAME : '☰ Set name';
+  if (p) p.textContent = NAME ? '☰ ' + NAME : (ANON ? '☰ Anonymous' : '☰ Set name');
 }
-function saveName(skip) {
-  const v = document.getElementById('nameInput').value.trim().slice(0, 40);
-  if (!skip && v) { NAME = v; localStorage.setItem('lp_name', NAME); }
+function closeNameModal() {
   document.getElementById('nameModal').classList.add('hidden');
   renderNamePill();
 }
+function saveName() {
+  const v = document.getElementById('nameInput').value.trim().slice(0, 40);
+  if (v) { NAME = v; ANON = false; localStorage.setItem('lp_name', NAME); localStorage.removeItem('lp_anon'); }
+  else { goAnonymous(); return; }   // an empty box means anonymous, not "ask again"
+  closeNameModal();
+}
+// Clear any stored name and remember the choice, so nothing already submitted
+// under a name is re-attributed and we never re-prompt.
+function goAnonymous() {
+  NAME = ''; ANON = true;
+  localStorage.removeItem('lp_name');
+  localStorage.setItem('lp_anon', '1');
+  closeNameModal();
+}
 function editName() {
   document.getElementById('nameInput').value = NAME;
+  document.getElementById('anonBtn').textContent = NAME ? 'Switch to anonymous' : 'Stay anonymous';
   document.getElementById('nameModal').classList.remove('hidden');
   document.getElementById('nameInput').focus();
 }
 renderNamePill();
-if (!NAME) {
+if (!NAME && !ANON) {
+  document.getElementById('anonBtn').textContent = 'Stay anonymous';
   document.getElementById('nameModal').classList.remove('hidden');
   document.getElementById('nameInput').focus();
 }

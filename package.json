@@ -2,10 +2,10 @@
   "name": "exco-live",
   "version": "1.0.0",
   "private": true,
-  "description": "ExCo Live — bespoke interactive live-polling app (Slido/Mentimeter-style)",
+  "description": "ExCo Live \u2014 bespoke interactive live-polling app (Slido/Mentimeter-style)",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node --env-file-if-exists=.env server.js"
   },
   "engines": {
     "node": "22.x"
