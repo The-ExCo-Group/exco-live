@@ -81,6 +81,7 @@ function toggleJoinScreen() {
 
 const TYPE_LABEL = {
   multiple_choice: 'Multiple choice', word_cloud: 'Word cloud', rating: 'Rating', open_text: 'Open text',
+  worksheet: 'Worksheet',
 };
 
 // ---- AI features ----------------------------------------------------------
@@ -177,6 +178,21 @@ async function aiDraft() {
 }
 
 // ---- create poll modal ----------------------------------------------------
+// The shipped worksheet, verbatim from the client's document. Kept here as well
+// as on the server so the "load" button fills the form with no round-trip.
+const MFI = {
+  title: 'Mentoring for Impact',
+  rowHeader: "Typical focus areas of a client's action plan",
+  rows: ['Delegation', 'Prioritization', 'Peer and stakeholder management'],
+  columns: [
+    'Stakeholders who would need to notice improvement',
+    'What might early indicators of success be?',
+    'How might longer-term impact show up?',
+  ],
+  instructions: 'What would stakeholders ideally see/think/feel differently about a client if we were making progress with them? Please fill out your suggestions for each box below.',
+  footnote: 'Friendly nudge here that "you can\'t measure this" is not an answer. If you had to help your client find a way to measure and demonstrate impact, what would it be?',
+};
+
 function openCreate() {
   document.getElementById('modal').classList.remove('hidden');
   document.getElementById('pQuestion').value = '';
@@ -187,6 +203,9 @@ function closeCreate() { document.getElementById('modal').classList.add('hidden'
 function renderTypeFields() {
   const type = document.getElementById('pType').value;
   const el = document.getElementById('typeFields');
+  // aiDraftPoll only knows the four question types; asked for a worksheet it
+  // would hand back a multiple-choice draft without saying so.
+  document.getElementById('aiDraftRow').classList.toggle('hidden', type === 'worksheet');
   if (type === 'multiple_choice') {
     el.innerHTML = '<label>Options</label><div id="opts"></div>' +
       '<button class="btn ghost sm" onclick="addOpt()">+ Add option</button>';
@@ -198,10 +217,33 @@ function renderTypeFields() {
       '<label>High-end label</label><input id="labHigh" type="text" value="Fully" />';
   } else if (type === 'word_cloud') {
     el.innerHTML = '<p class="small muted">Participants submit words or short phrases that appear sized by frequency.</p>';
+  } else if (type === 'worksheet') {
+    el.innerHTML =
+      '<p class="small muted">Participants type into every box of a grid and submit it once. Rows × columns is the whole worksheet.</p>' +
+      '<button class="btn ghost sm" onclick="loadMfiWorksheet()">Load the Mentoring for Impact worksheet</button>' +
+      '<label>Row header</label><input id="wsRowHeader" type="text" placeholder="What the rows are, e.g. Focus areas" />' +
+      '<label>Rows — one per line (max 6)</label>' +
+      '<textarea id="wsRows" style="min-height:84px" placeholder="Delegation&#10;Prioritization"></textarea>' +
+      '<label>Columns — one per line (max 4)</label>' +
+      '<textarea id="wsCols" style="min-height:84px" placeholder="Who would notice?&#10;Early indicators?"></textarea>' +
+      '<label>Instructions</label>' +
+      '<textarea id="wsInstructions" style="min-height:70px" placeholder="Shown above the grid on every phone"></textarea>' +
+      '<label>Footnote</label>' +
+      '<textarea id="wsFootnote" style="min-height:70px" placeholder="Shown under the grid"></textarea>';
   } else {
     el.innerHTML = '<p class="small muted">Participants submit free-text responses that stream in live.</p>';
   }
 }
+function loadMfiWorksheet() {
+  document.getElementById('pQuestion').value = MFI.title;
+  document.getElementById('wsRowHeader').value = MFI.rowHeader;
+  document.getElementById('wsRows').value = MFI.rows.join('\n');
+  document.getElementById('wsCols').value = MFI.columns.join('\n');
+  document.getElementById('wsInstructions').value = MFI.instructions;
+  document.getElementById('wsFootnote').value = MFI.footnote;
+  toast('Worksheet loaded — edit and create');
+}
+const splitLines = (s) => s.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
 function addOpt(val) {
   const box = document.getElementById('opts');
   const div = document.createElement('div');
@@ -223,6 +265,19 @@ async function createPoll(present) {
     payload.scaleLabelLow = document.getElementById('labLow').value;
     payload.scaleLabelHigh = document.getElementById('labHigh').value;
   }
+  if (type === 'worksheet') {
+    payload.rowHeader = document.getElementById('wsRowHeader').value.trim();
+    payload.rows = splitLines(document.getElementById('wsRows').value);
+    payload.columns = splitLines(document.getElementById('wsCols').value);
+    payload.instructions = document.getElementById('wsInstructions').value.trim();
+    payload.footnote = document.getElementById('wsFootnote').value.trim();
+    // An axis-less worksheet is nothing a phone can render, so the server quietly
+    // substitutes the shipped one — creating a poll nobody asked for.
+    if (!payload.rows.length !== !payload.columns.length) {
+      toast('Add both rows and columns, or leave both blank for the standard worksheet');
+      return;
+    }
+  }
   const { id } = await api('/poll', payload);
   closeCreate();
   if (present && id) await api('/poll/' + id + '/activate');
@@ -237,7 +292,23 @@ const TYPE_ALIAS = {
   poll: 'multiple_choice', word: 'word_cloud', wordcloud: 'word_cloud', word_cloud: 'word_cloud', cloud: 'word_cloud',
   rating: 'rating', rate: 'rating', scale: 'rating',
   text: 'open_text', open: 'open_text', open_text: 'open_text', opentext: 'open_text',
+  worksheet: 'worksheet', grid: 'worksheet', ws: 'worksheet',
 };
+
+// Append a ready-made worksheet block rather than replacing what is already typed:
+// the worksheet is one item in a run of show, not the whole run.
+function insertMfiBlock() {
+  const ta = document.getElementById('importText');
+  const block = '[worksheet] ' + MFI.title + '\n' +
+    '* ' + MFI.rowHeader + '\n' +
+    MFI.rows.map((r) => '- ' + r).join('\n') + '\n' +
+    MFI.columns.map((c) => '| ' + c).join('\n') + '\n' +
+    '> ' + MFI.instructions + '\n' +
+    '~ ' + MFI.footnote + '\n';
+  ta.value = ta.value.trim() ? ta.value.trim() + '\n\n' + block : block;
+  ta.focus();
+  toast('Worksheet block added');
+}
 
 // Parse the paste syntax into an array of poll definitions.
 function parseImport(raw) {
@@ -264,8 +335,17 @@ function parseImport(raw) {
         if (parts[1]) def.scaleLabelLow = parts[1];
         if (parts[2]) def.scaleLabelHigh = parts[2];
       }
+      if (type === 'worksheet') def.columns = [];
       def.question = question;
       cur = def;
+    } else if (cur && cur.type === 'worksheet' && /^[>*|~]\s+/.test(t)) {
+      // Before the bullet rule on purpose: inside a worksheet '*' labels the row
+      // axis. '-' bullets still land in options, which makePoll reads as rows.
+      const val = t.slice(1).trim();
+      if (t[0] === '>') cur.instructions = val;
+      else if (t[0] === '*') cur.rowHeader = val;
+      else if (t[0] === '|') cur.columns.push(val);
+      else cur.footnote = val;
     } else if (cur && /^[-*•]\s+/.test(t)) {
       cur.options.push(t.replace(/^[-*•]\s+/, '').trim());
     } else if (cur && !cur.question) {
@@ -281,6 +361,13 @@ async function runImport() {
   const replace = document.getElementById('importReplace').checked;
   const polls = parseImport(raw);
   if (!polls.length) { toast('Nothing to load — check the format'); return; }
+  // Same verdict the create modal reaches, and the server's. '-' rows with no '|'
+  // column lines — or '*' used as a plain bullet, which inside a worksheet is the
+  // row header — leaves one axis empty. A block with NEITHER axis is the shipped-
+  // worksheet shorthand and stays legal. Name the question, before the post.
+  const half = polls.find((p) => p.type === 'worksheet' &&
+    !!(p.rows || p.options || []).length !== !!(p.columns || []).length);
+  if (half) { toast('“' + half.question + '” needs at least one row (-) and one column (|)'); return; }
   const r = await api('/polls', { polls, replace });
   closeImport();
   document.getElementById('importText').value = '';
@@ -403,11 +490,13 @@ function renderStage() {
   content.classList.remove('hidden');
 
   const canSynth = poll.type === 'open_text' || poll.type === 'word_cloud';
+  const isWs = poll.type === 'worksheet';
   const head =
     '<div class="row" style="align-items:center;margin-bottom:8px">' +
     '<span class="type-chip">' + TYPE_LABEL[poll.type] + '</span>' +
-    '<span class="pill right">' + poll.totalVotes + ' responses</span>' +
+    '<span class="pill right">' + poll.totalVotes + (isWs ? ' worksheets' : ' responses') + '</span>' +
     (canSynth ? '<button class="btn ghost sm" onclick="aiSynth(\'' + poll.id + '\')">AI: Synthesize</button>' : '') +
+    (isWs ? '<button class="btn ghost sm" onclick="viewWorksheets(\'' + poll.id + '\')">View submissions</button>' : '') +
     '<button class="btn ghost sm" onclick="api(\'/poll/' + poll.id + '/reset\')">Reset</button>' +
     '<button class="btn danger sm" onclick="api(\'/poll/' + poll.id + '/close\')">End</button>' +
     '</div>' +
@@ -418,6 +507,7 @@ function renderStage() {
   else if (poll.type === 'rating') body = renderRating(poll);
   else if (poll.type === 'word_cloud') body = renderCloud(poll);
   else if (poll.type === 'open_text') body = renderResponses(poll);
+  else if (poll.type === 'worksheet') body = renderWorksheetLive(poll);
   content.innerHTML = head + body;
 }
 
@@ -469,7 +559,9 @@ function renderRating(poll) {
 
 // Word cloud: monochrome, sized by frequency; the single most frequent word is the gradient moment.
 function renderCloud(poll) {
-  const freq = {};
+  // Null prototype: the keys are whatever the room typed, and on a plain {} the
+  // word "constructor" reads back a function — every font-size then computes NaN.
+  const freq = Object.create(null);
   poll.words.forEach((w) => { const k = w.toLowerCase(); freq[k] = (freq[k] || 0) + 1; });
   const entries = Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, 60);
   if (!entries.length) return '<div class="empty">Waiting for the first words…</div>';
@@ -488,6 +580,91 @@ function renderResponses(poll) {
   const cards = poll.responses.slice().reverse().map((r) => '<div class="response">' + esc(r.text) +
     (r.author ? '<div class="small muted" style="margin-top:6px">— ' + esc(r.author) + '</div>' : '') + '</div>').join('');
   return '<div class="responses">' + cards + '</div>';
+}
+
+// Worksheet: the gradient moment is how many worksheets landed; the matrix is the
+// live signal. A box the room leaves blank is the one worth talking about, so the
+// thinnest cell is called out by name — the bodies themselves stay behind a fetch.
+function renderWorksheetLive(poll) {
+  const n = poll.gridCount || 0;
+  const rows = poll.rows || [];
+  const cols = poll.columns || [];
+  const head =
+    '<div class="row" style="align-items:baseline;gap:18px;margin-bottom:12px">' +
+    '<div class="stat-big stat-grad">' + n + '</div>' +
+    '<div class="muted">worksheet' + (n === 1 ? '' : 's') + ' submitted</div></div>' +
+    (poll.instructions ? '<p class="small muted" style="margin:0 0 16px;max-width:76ch;white-space:pre-wrap">' + esc(poll.instructions) + '</p>' : '');
+  if (!rows.length || !cols.length) return head + '<div class="empty">This worksheet has no grid.</div>';
+  if (!n) return head + '<div class="empty">Waiting for the first worksheet…</div>';
+
+  const fill = poll.cellFill || {};
+  const at = (r, c) => fill[r.id + c.id] || 0;
+  let low = null;
+  rows.forEach((r) => cols.forEach((c) => { if (!low || at(r, c) < low.v) low = { v: at(r, c), r, c }; }));
+
+  const cell = (r, c) => {
+    const v = at(r, c);
+    const pct = Math.round((v / n) * 100);
+    const gap = v === low.v && v < n;
+    return '<td style="padding:10px;vertical-align:top;border-top:1px solid var(--line);' +
+      (gap ? 'background:var(--surface-2)' : '') + '">' +
+      '<div class="row" style="gap:8px;align-items:baseline;justify-content:space-between;margin-bottom:6px">' +
+      '<b style="font-family:var(--font-serif);font-weight:500;font-size:22px">' + v + '</b>' +
+      '<span class="small muted">' + pct + '%</span></div>' +
+      '<div class="bar-track" style="height:6px"><div class="bar-fill' + (v === n ? ' lead' : '') +
+      '" style="width:' + Math.max(pct, v ? 4 : 0) + '%"></div></div></td>';
+  };
+  const thead = '<tr><th style="text-align:left;vertical-align:bottom;padding:0 10px 10px 0;width:24%">' +
+    '<span class="type-chip">' + esc(poll.rowHeader || 'Rows') + '</span></th>' +
+    cols.map((c) => '<th style="text-align:left;vertical-align:bottom;padding:0 10px 10px;font-family:var(--font-display);' +
+      'font-weight:700;font-size:13px;line-height:1.25">' + esc(c.text) + '</th>').join('') + '</tr>';
+  const tbody = rows.map((r) =>
+    '<tr><th style="text-align:left;vertical-align:top;padding:10px 10px 10px 0;border-top:1px solid var(--line);' +
+    'font-family:var(--font-display);font-weight:700;font-size:15px;line-height:1.2">' + esc(r.text) + '</th>' +
+    cols.map((c) => cell(r, c)).join('') + '</tr>').join('');
+  const note = low.v < n
+    ? '<p class="small muted" style="margin:16px 0 0">Thinnest box: <b>' + esc(low.r.text) + '</b> × <b>' +
+      esc(low.c.text) + '</b> — only ' + low.v + ' of ' + n + ' filled it in.</p>'
+    : '<p class="small muted" style="margin:16px 0 0">Every box filled by all ' + n + '.</p>';
+  return head + '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;min-width:520px">' +
+    '<thead>' + thead + '</thead><tbody>' + tbody + '</tbody></table></div>' + note;
+}
+
+// The bodies ride no broadcast frame — 100 grids of 9 cells would be ~135 KB per
+// tick — so the panel pulls them the moment the presenter asks to read them.
+async function viewWorksheets(pollId) {
+  const title = 'Worksheet submissions';
+  aiShow(title, '<p class="empty">Loading…</p>');
+  let d = null;
+  try {
+    const res = await fetch('/api/room/' + CODE + '/poll/' + pollId + '/worksheet');
+    if (res.ok) d = await res.json().catch(() => null);
+  } catch { /* handled below */ }
+  if (!d) { aiShow(title, '<p class="empty">Could not load submissions — try again.</p>'); return; }
+  const rows = d.rows || [];
+  const cols = d.columns || [];
+  const grids = d.grids || [];
+  if (!grids.length) { aiShow(title, '<p class="empty">No worksheets submitted yet.</p>'); return; }
+  const boxes = rows.length * cols.length;
+  const html = grids.slice().reverse().map((g) => {
+    const cells = g.cells || {};
+    const filled = Object.keys(cells).length;
+    const body = rows.map((r) => {
+      const answers = cols
+        .filter((c) => cells[r.id + c.id])
+        .map((c) => '<div class="response" style="white-space:pre-wrap"><div class="small muted" style="margin-bottom:6px">' +
+          esc(c.text) + '</div>' + esc(cells[r.id + c.id]) + '</div>')
+        .join('');
+      if (!answers) return '';
+      return '<p class="eyebrow" style="margin:14px 0 0">' + esc(r.text) + '</p><div class="responses">' + answers + '</div>';
+    }).join('');
+    return '<div class="card" style="margin-bottom:12px"><div class="row" style="align-items:center">' +
+      '<b style="font-family:var(--font-display);font-size:16px">' + esc(g.author || 'Anonymous') + '</b>' +
+      '<span class="pill right">' + filled + ' of ' + boxes + ' boxes</span></div>' +
+      (body || '<p class="small muted" style="margin:10px 0 0">Every box left blank.</p>') + '</div>';
+  }).join('');
+  aiShow(title, '<p class="sub">' + grids.length + ' worksheet' + (grids.length === 1 ? '' : 's') +
+    ', newest first.</p>' + html);
 }
 
 function renderQA() {

@@ -5,6 +5,7 @@
 
 const TYPE_LABEL = {
   multiple_choice: 'Multiple choice', word_cloud: 'Word cloud', rating: 'Rating', open_text: 'Open text',
+  worksheet: 'Worksheet',
 };
 
 function esc(s) {
@@ -233,13 +234,46 @@ function renderResult(p) {
       '<div class="bars">' + rows + '</div>';
   }
   if (p.type === 'word_cloud') {
-    const freq = {};
+    // Null prototype: the keys are whatever the room typed, and on a plain {}
+    // the word "constructor" reads back a function instead of 0.
+    const freq = Object.create(null);
     p.words.forEach((w) => { const k = w.toLowerCase(); freq[k] = (freq[k] || 0) + 1; });
     const entries = Object.entries(freq).sort((a, b) => b[1] - a[1]);
     if (!entries.length) return '<p class="muted small">No words submitted.</p>';
     return '<div class="bars">' + entries.map(([w, c]) =>
       '<div class="bar-row"><div class="bar-top"><span class="bar-label">' + esc(w) +
       '</span><span class="bar-val">' + c + '</span></div></div>').join('') + '</div>';
+  }
+  // Unlike the SSE payload, /api/analytics/:code carries the grid bodies, so the
+  // archived worksheet is read box by box rather than as a fill-count heatmap.
+  if (p.type === 'worksheet') {
+    const rows = p.rows || [], cols = p.columns || [], grids = p.grids || [];
+    if (!grids.length || !rows.length || !cols.length) return '<p class="muted small">No worksheets submitted.</p>';
+    const n = grids.length;
+    const answersFor = (key) => grids
+      .map((g) => ({ text: String((g.cells || {})[key] || '').trim(), author: g.author }))
+      .filter((a) => a.text);
+    let filled = 0, html = '';
+    rows.forEach((r) => {
+      html += '<p class="eyebrow" style="margin-top:16px">' + esc(r.text) + '</p>';
+      cols.forEach((c) => {
+        const got = answersFor(r.id + c.id);
+        filled += got.length;
+        html += '<p style="margin:10px 0 6px"><b>' + esc(c.text) + '</b>' +
+          '<span class="muted small"> · answered ' + got.length + ' of ' + n + '</span></p>';
+        html += got.length
+          // Answers keep their newlines (the server stores them via cleanMulti), and a
+          // collapsed multi-line answer reads as one run-on sentence.
+          ? '<div class="responses">' + got.map((a) => '<div class="response" style="white-space:pre-wrap">' + esc(a.text) +
+            (a.author ? '<div class="small muted" style="margin-top:6px">— ' + esc(a.author) + '</div>' : '') + '</div>').join('') + '</div>'
+          // A box nobody could fill is a finding for the facilitator, not a rendering gap.
+          : '<p class="muted small" style="margin:0">Nobody answered this box.</p>';
+      });
+    });
+    // Numerators and denominators here are the sums of the per-box counts below,
+    // so the headline can be checked against the detail.
+    return '<p class="muted small" style="margin:0">' + plural(n, 'worksheet') + ' · ' +
+      filled + ' of ' + (n * rows.length * cols.length) + ' boxes filled</p>' + html;
   }
   // open_text
   if (!p.responses.length) return '<p class="muted small">No responses submitted.</p>';

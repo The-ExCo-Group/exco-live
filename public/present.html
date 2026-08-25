@@ -99,11 +99,14 @@
         <option value="word_cloud">Word cloud</option>
         <option value="rating">Rating / scale</option>
         <option value="open_text">Open text</option>
+        <option value="worksheet">Worksheet grid</option>
       </select>
-      <label>Draft with AI</label>
-      <div class="row tight">
-        <input id="pTopic" class="grow" type="text" placeholder="Topic, e.g. biggest Q4 risk" />
-        <button class="btn ghost" onclick="aiDraft()" id="aiDraftBtn">Draft</button>
+      <div id="aiDraftRow">
+        <label>Draft with AI</label>
+        <div class="row tight">
+          <input id="pTopic" class="grow" type="text" placeholder="Topic, e.g. biggest Q4 risk" />
+          <button class="btn ghost" onclick="aiDraft()" id="aiDraftBtn">Draft</button>
+        </div>
       </div>
       <label>Question</label>
       <input id="pQuestion" type="text" placeholder="What should we ask?" />
@@ -131,7 +134,20 @@
 
 [wordcloud] One word for this quarter?
 
-[text] What's the biggest barrier to your team's performance?</div>
+[text] What's the biggest barrier to your team's performance?
+
+[worksheet] Mentoring for Impact
+* Typical focus areas of a client's action plan
+- Delegation
+- Prioritization
+| Stakeholders who would need to notice improvement
+| What might early indicators of success be?
+&gt; Instructions shown above the grid
+~ Footnote shown under the grid
+(worksheet: * row header, - row, | column, &gt; instructions, ~ footnote)</div>
+      <div class="row tight" style="margin:12px 0 4px">
+        <button class="btn ghost sm" onclick="insertMfiBlock()">Insert Mentoring for Impact</button>
+      </div>
       <label>Your questions</label>
       <textarea id="importText" style="min-height:200px; font-family:ui-monospace,Menlo,monospace; font-size:13px"></textarea>
       <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-family:var(--font-body);font-size:14px;color:var(--text)">

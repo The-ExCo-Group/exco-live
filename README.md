@@ -7,11 +7,14 @@ styled to **The ExCo Group** brand system. Zero external dependencies — just N
 
 - **Host a session** → get a 5-character join code + shareable link + scannable QR.
 - **Audience joins** from any phone/laptop on the network — no login, no install.
-- **Four interaction types**, all with live results that push instantly to every screen:
+- **Five interaction types**, all with live results that push instantly to every screen:
   - Multiple choice (bar chart)
   - Word cloud (sized by frequency)
   - Rating / scale (average + distribution)
   - Open text (responses stream in as cards)
+  - **Worksheet grid** (a rows x columns sheet — e.g. the *Mentoring for Impact*
+    worksheet — filled in on each participant's phone; the stage shows a live
+    fill matrix of which boxes the room can and can't answer)
 - **Live Q&A board** — audience submits questions and upvotes; host moderates and dismisses.
 - **Preloaded run of show** — load all your questions before the event and step through them
   live with Next / Prev (or the ← → arrow keys). Save a run of show as a reusable **agenda
@@ -45,6 +48,17 @@ writes through to Supabase, and the server reloads from it on boot. Configure vi
 env vars — `SUPABASE_URL` and `SUPABASE_KEY` (the publishable key). If they're unset the
 app runs in-memory only (no persistence), which is a safe fallback for local dev.
 
+**Database schema:** the `polls` table needs two columns for the worksheet poll type.
+They are additive and safe to run on an existing database (existing rows backfill to the
+defaults), but the app cannot persist *anything* until they exist — an un-migrated table
+rejects the whole write batch, not just the worksheet part. Run once in the Supabase SQL
+editor before deploying:
+
+```sql
+alter table polls add column if not exists worksheet jsonb not null default '{}'::jsonb;
+alter table polls add column if not exists grids     jsonb not null default '[]'::jsonb;
+```
+
 **AI features (Claude):** With an `ANTHROPIC_API_KEY` set, the app adds AI helpers via the
 Claude API (called server-side over plain HTTPS — no npm dependency): live **Q&A theme
 clustering** and **open-text / word-cloud synthesis** on the presenter console, an **AI
@@ -76,6 +90,10 @@ Three ways to get questions in before you go on stage:
    ```
 
    Tags: `[mc]` multiple choice, `[wordcloud]`, `[rating 1-N] … | lowLabel | highLabel`, `[text]`.
+
+   `[worksheet]` builds a grid. `-` lines are rows, `|` lines are columns, `>` is the
+   instruction shown above the grid, `*` the row-header, `~` the footnote. A bare
+   `[worksheet]` with no body loads the shipped *Mentoring for Impact* sheet.
 
 2. **Agenda templates** — **Save agenda** stores the current run of show under a name;
    **Load agenda** preloads it into any session. Reuse the same set across events.
@@ -163,5 +181,5 @@ Natural next steps toward production:
 - Move state to a real store + horizontally-scalable real-time (Cloudflare Durable
   Objects or Supabase Realtime) so it survives restarts and multiple server instances.
 - Add presenter authentication (SSO) if sessions should be access-controlled.
-- Export results (CSV / PDF) and a post-session summary.
+- Export results (PDF) — CSV already ships.
 - Rate-limiting / abuse controls if ever exposed beyond the internal network.

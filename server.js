@@ -127,6 +127,16 @@ const inList = (ids) => `(${ids.join(',')})`;
 
 // The row shapes are the schema contract, so they live in one place — the
 // change detector below fingerprints exactly what gets POSTed.
+// The tables are managed by hand, and PostgREST 400s the WHOLE batch on one
+// unknown column — so adding a field here without adding the column first stops
+// every poll of every type persisting, not just the new one. `grids` and
+// `worksheet` are new; run this once against the project before deploying:
+//   alter table polls
+//     add column if not exists grids jsonb not null default '[]'::jsonb,
+//     add column if not exists worksheet jsonb not null default '{}'::jsonb;
+// Fingerprints are only committed once a write lands, so the next save() after
+// the columns exist re-sends everything the failed batch dropped — a room that is
+// still live recovers on its own. One already archived by /end never saves again.
 const pollRow = (code, p, i) => ({
   id: p.id,
   room_code: code,
@@ -142,6 +152,18 @@ const pollRow = (code, p, i) => ({
   words: p.words || [],
   ratings: p.ratings || [],
   responses: p.responses || [],
+  grids: p.grids || [],
+  // One jsonb blob rather than five more columns: this row shape is written out
+  // field by field, and the five are only ever read back together.
+  worksheet: p.type === 'worksheet'
+    ? {
+      rows: p.rows || [],
+      columns: p.columns || [],
+      rowHeader: p.rowHeader || '',
+      instructions: p.instructions || '',
+      footnote: p.footnote || '',
+    }
+    : {},
   total_votes: totalVotes(p),
 });
 
@@ -357,6 +379,7 @@ async function load() {
     for (const p of pollRows || []) {
       const r = rooms[p.room_code];
       if (!r) continue;
+      const w = p.worksheet || {};
       r.polls.push({
         id: p.id,
         type: p.type,
@@ -370,6 +393,12 @@ async function load() {
         words: p.words || [],
         ratings: p.ratings || [],
         responses: p.responses || [],
+        grids: p.grids || [],
+        rows: w.rows || [],
+        columns: w.columns || [],
+        rowHeader: w.rowHeader || '',
+        instructions: w.instructions || '',
+        footnote: w.footnote || '',
       });
     }
     for (const q of qRows || []) {
@@ -449,6 +478,7 @@ async function fetchRoomDetail(code) {
     endedAt: r.ended_at,
     activePollId: r.active_poll_id,
     polls: (polls || []).map((p) => ({
+      id: p.id,   // the dashboard needs to address one specific poll, not just its position
       position: p.position,
       type: p.type,
       question: p.question,
@@ -461,6 +491,12 @@ async function fetchRoomDetail(code) {
       words: p.words || [],
       ratings: p.ratings || [],
       responses: p.responses || [],
+      grids: p.grids || [],
+      rows: (p.worksheet || {}).rows || [],
+      columns: (p.worksheet || {}).columns || [],
+      rowHeader: (p.worksheet || {}).rowHeader || '',
+      instructions: (p.worksheet || {}).instructions || '',
+      footnote: (p.worksheet || {}).footnote || '',
       totalVotes: p.total_votes || 0,
     })),
     questions: questions || [],
@@ -475,11 +511,14 @@ function csvCell(v) {
 
 // Flatten a session's results into analysis-friendly CSV rows.
 function toCSV(d) {
-  const header = ['session', 'code', 'date', 'poll', 'type', 'question', 'answer', 'count', 'percent', 'author'];
+  const header = ['session', 'code', 'date', 'poll', 'type', 'question', 'worksheet_row', 'worksheet_column', 'answer', 'count', 'percent', 'author'];
   const rows = [header];
   const date = (d.createdAt || '').slice(0, 10);
   const add = (poll, type, question, answer, count, percent, author) =>
-    rows.push([d.title, d.code, date, poll, type, question, answer, count, percent, author || '']);
+    rows.push([d.title, d.code, date, poll, type, question, '', '', answer, count, percent, author || '']);
+  // Separate helper so the two new columns cost no existing call site an argument.
+  const addWs = (poll, question, row, col, answer, count, author) =>
+    rows.push([d.title, d.code, date, poll, 'worksheet', question, row, col, answer, count, '', author || '']);
 
   d.polls.forEach((p) => {
     const n = p.position + 1;
@@ -500,11 +539,22 @@ function toCSV(d) {
       }
       add(n, p.type, p.question, 'AVERAGE', avg, '');
     } else if (p.type === 'word_cloud') {
-      const freq = {};
+      // Null prototype: the keys are whatever the room typed, and on a plain {}
+      // the word "constructor" reads back a function instead of 0.
+      const freq = Object.create(null);
       p.words.forEach((w) => { const k = w.toLowerCase(); freq[k] = (freq[k] || 0) + 1; });
       Object.entries(freq).sort((a, b) => b[1] - a[1]).forEach(([w, c]) => add(n, p.type, p.question, w, c, ''));
     } else if (p.type === 'open_text') {
       p.responses.forEach((r) => add(n, p.type, p.question, r.text, 1, '', r.author));
+    } else if (p.type === 'worksheet') {
+      // Every cell of every respondent, blanks included with count 0. The grid
+      // stays rectangular, so "which boxes could nobody fill" is one pivot away.
+      (p.grids || []).forEach((g) => {
+        (p.rows || []).forEach((r) => (p.columns || []).forEach((c) => {
+          const t = (g.cells || {})[r.id + c.id] || '';
+          addWs(n, p.question, r.text, c.text, t, t ? 1 : 0, g.author);
+        }));
+      });
     }
   });
   d.questions.forEach((q) => add('', 'qa', 'Audience Q&A', q.text, q.votes, '', q.author));
@@ -719,6 +769,23 @@ function claude(opts) {
 // JSON-schema helper: object with all listed string/array props required.
 const strObj = (props, req) => ({ type: 'object', additionalProperties: false, properties: props, required: req });
 
+// The shipped worksheet, verbatim from the client's document. Also the fallback
+// for a worksheet that arrives with no grid of its own: a worksheet with no rows
+// or columns is nothing a participant can fill in, so an empty one is worse than
+// the default one.
+const MFI_WORKSHEET = {
+  title: 'Mentoring for Impact',
+  rowHeader: "Typical focus areas of a client's action plan",
+  rows: ['Delegation', 'Prioritization', 'Peer and stakeholder management'],
+  columns: [
+    'Stakeholders who would need to notice improvement',
+    'What might early indicators of success be?',
+    'How might longer-term impact show up?',
+  ],
+  instructions: 'What would stakeholders ideally see/think/feel differently about a client if we were making progress with them? Please fill out your suggestions for each box below.',
+  footnote: 'Friendly nudge here that "you can\'t measure this" is not an answer. If you had to help your client find a way to measure and demonstrate impact, what would it be?',
+};
+
 // Prepended to every prompt that reports on real session data. Structured outputs
 // force the model to emit every required field, so a model handed a thin session
 // has no legal way to abstain — and fills the empty sections with invention that
@@ -857,6 +924,12 @@ function participantText(d) {
   ((d && d.polls) || []).forEach((p) => {
     if (p.type === 'open_text') (p.responses || []).forEach((r) => out.push(r.text));
     else if (p.type === 'word_cloud') (p.words || []).forEach((w) => out.push(w));
+    // One item per cell, not per submission: a joined grid would let two people's
+    // boxes be stitched into one passing "quote". Newlines are folded because the
+    // corpus folds them too, and a quote is only ever copied from the corpus.
+    else if (p.type === 'worksheet') {
+      (p.grids || []).forEach((g) => Object.values(g.cells || {}).forEach((t) => out.push(String(t).replace(/\n+/g, ' / '))));
+    }
   });
   return out;
 }
@@ -922,6 +995,7 @@ function insufficientTrends(total, answered) {
 // is indistinguishable from a truncated payload, and a model that believes data
 // was withheld supplies its own. BEGIN/END markers replace '---' because
 // participant text can contain a markdown rule and split a session in two.
+const CELL_SAMPLE = 8;   // answers printed per worksheet box; the count line carries the rest
 function sessionCorpus(d) {
   const st = responseStats(d);
   const lines = [
@@ -943,6 +1017,20 @@ function sessionCorpus(d) {
       lines.push('  words: ' + p.words.join(', '));
     } else if (p.type === 'open_text') {
       p.responses.forEach((r) => lines.push(`  · ${r.text}`));
+    } else if (p.type === 'worksheet') {
+      lines.push(`  worksheet grid - rows: ${p.rowHeader || '(unlabelled)'}`);
+      (p.rows || []).forEach((r) => (p.columns || []).forEach((c) => {
+        const answers = (p.grids || [])
+          .map((g) => (g.cells || {})[r.id + c.id])
+          .filter((t) => t && t.trim());
+        lines.push(`  [${r.text} | ${c.text}] - ${answers.length} of ${n} answered`);
+        // One answer per line: a cell can hold newlines, and a wrapped answer
+        // reads as several separate ones. Sampled, because a worksheet holds
+        // rows x cols bodies per participant where every other type holds one —
+        // 25 unsampled sessions overrun the model's context on their own.
+        answers.slice(0, CELL_SAMPLE).forEach((t) => lines.push(`    · ${t.replace(/\n+/g, ' / ')}`));
+        if (answers.length > CELL_SAMPLE) lines.push(`    ... and ${answers.length - CELL_SAMPLE} more answer(s) in this box`);
+      }));
     }
   });
   lines.push(st.questions
@@ -987,6 +1075,14 @@ function aiDebrief(detail) {
   }));
 }
 
+// Trends joins up to 25 corpora into one prompt, so a single long session cannot be
+// allowed to eat the context the other 24 need. Truncated rather than dropped: a
+// thin slice of a session still counts toward "the same theme in two sessions".
+const TRENDS_SESSION_BYTES = 12000;
+const clipCorpus = (s) => (s.length <= TRENDS_SESSION_BYTES
+  ? s
+  : s.slice(0, TRENDS_SESSION_BYTES) + '\n... (this session\'s data is truncated here to fit the comparison)\n=== END SESSION DATA ===');
+
 // 5) Cross-event trends across multiple session detail objects.
 // Sessions with no participant data are dropped from the corpus, not just labelled.
 // An empty session still prints its PRESENTER-AUTHORED poll questions, which are
@@ -1007,7 +1103,7 @@ function aiTrends(details, totalSessions) {
       'one session\'s data is never a trend. Name the sessions each trend was read from. Do ' +
       'not claim a shift over time unless both endpoints of that shift appear in the data. ' +
       'Write a short summary, the trends, and recommendations that follow from them.',
-    user: `${header}\n\n${withData.map(sessionCorpus).join('\n\n')}`,
+    user: `${header}\n\n${withData.map((d) => clipCorpus(sessionCorpus(d))).join('\n\n')}`,
     maxTokens: 3000,
     schema: strObj({
       insufficientData: { type: 'boolean', description: 'True when fewer than two sessions share a theme, or the data is too thin to compare. Say why in dataNotes and leave the arrays empty.' },
@@ -1038,6 +1134,13 @@ function pollsToDefs(polls) {
     scaleMax: p.scaleMax,
     scaleLabelLow: p.scaleLabelLow,
     scaleLabelHigh: p.scaleLabelHigh,
+    // Without these a saved agenda round-trips a custom worksheet back through
+    // makePoll, which finds no grid and quietly substitutes the default one.
+    rows: (p.rows || []).map((r) => r.text),
+    columns: (p.columns || []).map((c) => c.text),
+    rowHeader: p.rowHeader,
+    instructions: p.instructions,
+    footnote: p.footnote,
   }));
 }
 
@@ -1087,6 +1190,16 @@ function publicRoom(r) {
       words: p.words,
       ratings: p.ratings,
       responses: p.responses,
+      rows: p.rows || [],
+      columns: p.columns || [],
+      rowHeader: p.rowHeader || '',
+      instructions: p.instructions || '',
+      footnote: p.footnote || '',
+      // Never the bodies: 100 grids x 9 cells is ~135 KB on every tick, to every
+      // client. The presenter pulls them from /poll/:id/worksheet on demand.
+      grids: [],
+      gridCount: (p.grids || []).length,
+      cellFill: cellFill(p),
       totalVotes: totalVotes(p),
     })),
     questions: r.questions
@@ -1115,6 +1228,13 @@ function participantRoom(r) {
         scaleMax: p.scaleMax,
         scaleLabelLow: p.scaleLabelLow,
         scaleLabelHigh: p.scaleLabelHigh,
+        // The grid definition, without a single body: a phone cannot render the
+        // worksheet at all without these five, and needs nothing else.
+        rows: p.rows || [],
+        columns: p.columns || [],
+        rowHeader: p.rowHeader || '',
+        instructions: p.instructions || '',
+        footnote: p.footnote || '',
         totalVotes: totalVotes(p),   // aggregate only — never the raw responses
       }]
       : [],
@@ -1129,7 +1249,27 @@ function totalVotes(p) {
   if (p.type === 'word_cloud') return p.words.length;
   if (p.type === 'rating') return p.ratings.length;
   if (p.type === 'open_text') return p.responses.length;
+  // Load-bearing: this is what total_votes persists, so without it a fully
+  // answered worksheet reports zero responses to analytics, the presenter pill
+  // and the AI data gates alike.
+  if (p.type === 'worksheet') return (p.grids || []).length;
   return 0;
+}
+
+// How many respondents filled each cell — 9 ints, ~100 bytes. Derived on the way
+// out and never persisted, so the stage can show fill progress live without the
+// bodies riding every broadcast tick.
+function cellFill(p) {
+  const out = {};
+  const rows = p.rows || [];
+  const cols = p.columns || [];
+  for (const r of rows) for (const c of cols) out[r.id + c.id] = 0;
+  for (const g of p.grids || []) {
+    for (const r of rows) for (const c of cols) {
+      if (String((g.cells || {})[r.id + c.id] || '').trim()) out[r.id + c.id]++;
+    }
+  }
+  return out;
 }
 
 const BROADCAST_MS = 120;
@@ -1319,6 +1459,18 @@ function clean(str, max = 280) {
     .slice(0, max);
 }
 
+// Same sweep, but \n survives. Worksheet cells are longer-form and people type
+// short lists into them — clean() flattens every control char to a space and
+// would silently run those lists into one line.
+function cleanMulti(str, max = 400) {
+  return String(str == null ? '' : str)
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\x00-\x09\x0b-\x1f\x7f]/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .slice(0, max);
+}
+
 // Submission de-dupe. With 100 phones on venue wifi the client has to retry,
 // and retrying is only safe if a repeat is a no-op instead of a second count.
 // Bounded FIFO so a long session cannot grow the set without limit.
@@ -1336,10 +1488,32 @@ function applied(holder, sid) {
   return false;
 }
 
+// One axis of a worksheet grid. The ids are positional (r1..rN / c1..cN), never
+// id() hex: the key set has to be small and closed so a participant's saved draft
+// still matches after a reload, and so a CSV column header stays readable.
+const gridAxis = (list, max, cap, prefix) =>
+  (Array.isArray(list) ? list : [])
+    .map((t) => clean(t, max))
+    .filter(Boolean)
+    .slice(0, cap)
+    .map((text, i) => ({ id: prefix + (i + 1), text }));
+
+// A worksheet definition carrying exactly one axis. The presenter typed rows and
+// forgot the columns (or the reverse) — makePoll cannot guess the other half, and
+// the run-of-show importer reaches this on an ordinary typo, so every create path
+// says so rather than silently shipping a grid nobody wrote.
+function halfWorksheet(d) {
+  if (!d || d.type !== 'worksheet') return false;
+  const rows = gridAxis(d.rows || d.options, 120, 6, 'r').length;
+  const cols = gridAxis(d.columns, 160, 4, 'c').length;
+  return (rows > 0) !== (cols > 0);
+}
+const WORKSHEET_AXES_ERROR = { error: 'worksheet_needs_both_axes' };
+
 // Build a validated poll object from a raw definition (used by single + bulk create).
 function makePoll(def) {
   def = def || {};
-  const type = ['multiple_choice', 'word_cloud', 'rating', 'open_text'].includes(def.type)
+  const type = ['multiple_choice', 'word_cloud', 'rating', 'open_text', 'worksheet'].includes(def.type)
     ? def.type
     : 'multiple_choice';
   const poll = {
@@ -1355,6 +1529,12 @@ function makePoll(def) {
     words: [],
     ratings: [],
     responses: [],
+    rows: [],
+    columns: [],
+    rowHeader: '',
+    instructions: '',
+    footnote: '',
+    grids: [],
   };
   if (type === 'multiple_choice') {
     const opts = Array.isArray(def.options) ? def.options : [];
@@ -1374,6 +1554,27 @@ function makePoll(def) {
   if (type === 'rating') {
     const m = parseInt(def.scaleMax, 10);
     poll.scaleMax = m >= 2 && m <= 10 ? m : 5;
+  }
+  if (type === 'worksheet') {
+    poll.rowHeader = clean(def.rowHeader, 120);
+    poll.instructions = cleanMulti(def.instructions, 400);
+    poll.footnote = cleanMulti(def.footnote, 400);
+    // def.options as well as def.rows: the run-of-show importer already parses
+    // '- bullet' lines into options, so worksheet rows come for free there.
+    poll.rows = gridAxis(def.rows || def.options, 120, 6, 'r');
+    poll.columns = gridAxis(def.columns, 160, 4, 'c');
+    // Both axes empty is the "give me the shipped worksheet" shorthand. One axis
+    // empty is a half-written definition, and substituting MFI's grid there would
+    // publish rows the presenter never wrote under the title they did — so the
+    // create endpoints reject that case before it reaches here.
+    if (!poll.rows.length && !poll.columns.length) {
+      poll.rowHeader = poll.rowHeader || MFI_WORKSHEET.rowHeader;
+      poll.instructions = poll.instructions || MFI_WORKSHEET.instructions;
+      poll.footnote = poll.footnote || MFI_WORKSHEET.footnote;
+      poll.rows = gridAxis(MFI_WORKSHEET.rows, 120, 6, 'r');
+      poll.columns = gridAxis(MFI_WORKSHEET.columns, 160, 4, 'c');
+      if (!clean(def.question, 200)) poll.question = MFI_WORKSHEET.title;
+    }
   }
   return poll;
 }
@@ -1483,8 +1684,11 @@ async function handleApi(req, res, seg, url) {
     const body = await readBody(req);
     const code = newCode();
     let polls = [];
-    if (Array.isArray(body.polls)) polls = body.polls.slice(0, 100).map((d) => makePoll(d));
-    else if (body.agenda && agendas[String(body.agenda).toLowerCase()]) {
+    if (Array.isArray(body.polls)) {
+      const defs = body.polls.slice(0, 100);
+      if (defs.some(halfWorksheet)) return send(res, 400, WORKSHEET_AXES_ERROR);
+      polls = defs.map((d) => makePoll(d));
+    } else if (body.agenda && agendas[String(body.agenda).toLowerCase()]) {
       polls = agendas[String(body.agenda).toLowerCase()].polls.map((d) => makePoll(d));
     }
     rooms[code] = {
@@ -1520,6 +1724,7 @@ async function handleApi(req, res, seg, url) {
       polls = pollsToDefs(rooms[String(body.fromRoom).toUpperCase()].polls);
     }
     if (!polls || !polls.length) return send(res, 400, { error: 'no_polls' });
+    if (polls.some(halfWorksheet)) return send(res, 400, WORKSHEET_AXES_ERROR);
     // sanitize through makePoll then back to defs so stored data is clean
     const defs = pollsToDefs(polls.map((d) => makePoll(d)));
     const key = name.toLowerCase();
@@ -1600,6 +1805,15 @@ async function handleApi(req, res, seg, url) {
   if (seg[0] === 'room' && seg[2] === undefined && req.method === 'GET') {
     if (!room) return notFound(res);
     return send(res, 200, publicRoom(room));
+  }
+
+  // GET /api/room/:code/poll/:id/worksheet — the bodies, on demand. They are kept
+  // out of every broadcast frame, so the presenter fetches them when a panel opens.
+  if (seg[0] === 'room' && seg[2] === 'poll' && seg[4] === 'worksheet' && req.method === 'GET') {
+    if (!room) return notFound(res);
+    const p = room.polls.find((x) => x.id === seg[3]);
+    if (!p || p.type !== 'worksheet') return notFound(res);
+    return send(res, 200, { rows: p.rows, columns: p.columns, grids: p.grids });
   }
 
   // GET /api/stream/:code   (SSE)
@@ -1703,6 +1917,7 @@ async function handleApi(req, res, seg, url) {
 
     // ---- Poll management (presenter) --------------------------------
     if (action === 'poll' && seg[3] === undefined) {
+      if (halfWorksheet(body)) return send(res, 400, WORKSHEET_AXES_ERROR);
       const poll = makePoll(body);
       room.polls.push(poll);
       save(code);
@@ -1713,6 +1928,9 @@ async function handleApi(req, res, seg, url) {
     // Bulk preload — create many polls at once (run of show). Optionally replace existing drafts.
     if (action === 'polls' && seg[3] === undefined) {
       const defs = Array.isArray(body.polls) ? body.polls.slice(0, 100) : [];
+      // Before `replace` drops the existing drafts: a rejected import must leave
+      // the run of show exactly as it was.
+      if (defs.some(halfWorksheet)) return send(res, 400, WORKSHEET_AXES_ERROR);
       if (body.replace) {
         // keep any poll that already has responses; drop untouched drafts
         room.polls = room.polls.filter((p) => totalVotes(p) > 0);
@@ -1788,6 +2006,7 @@ async function handleApi(req, res, seg, url) {
         poll.words = [];
         poll.ratings = [];
         poll.responses = [];
+        poll.grids = [];
         save(code);
         broadcast(code, true);
         return send(res, 200, { ok: true });
@@ -1842,6 +2061,26 @@ async function handleApi(req, res, seg, url) {
           return send(res, 200, { ok: true });
         }
         return send(res, 400, { error: 'empty' });
+      }
+      if (op === 'worksheet' && poll.type === 'worksheet') {
+        if (applied(poll, clean(body.sid, 64))) return send(res, 200, { ok: true, duplicate: true });
+        const src = (body.cells && typeof body.cells === 'object') ? body.cells : {};
+        // Keys are built from this poll's own axes, so a key from a stale draft
+        // (or anything else) is dropped rather than stored under a cell that no
+        // longer exists.
+        const cells = {};
+        for (const r of poll.rows) {
+          for (const c of poll.columns) {
+            const t = cleanMulti(src[r.id + c.id], 400);
+            if (t) cells[r.id + c.id] = t;
+          }
+        }
+        if (!Object.keys(cells).length) return send(res, 400, { error: 'empty' });
+        poll.grids.push({ id: id(), ts: now(), author: clean(body.author, 40), source: 'typed', cells });
+        if (poll.grids.length > 500) poll.grids = poll.grids.slice(-500);
+        save(code);
+        broadcast(code);
+        return send(res, 200, { ok: true });
       }
     }
 

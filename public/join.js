@@ -9,7 +9,9 @@ if (!ME) { ME = Math.random().toString(36).slice(2) + Date.now().toString(36); l
 
 // Track what this device has already done, keyed by poll/question id
 const done = JSON.parse(localStorage.getItem('lp_done_' + CODE) || '{}');
-function markDone(k) { done[k] = 1; localStorage.setItem('lp_done_' + CODE, JSON.stringify(done)); }
+// The stored value is a marker, not a flag — worksheet records how many boxes
+// went in so the confirmation can say so. isDone() only ever reads truthiness.
+function markDone(k, v) { done[k] = v || 1; localStorage.setItem('lp_done_' + CODE, JSON.stringify(done)); }
 function isDone(k) { return !!done[k]; }
 
 // Participant name — remembered on this device across sessions.
@@ -129,6 +131,9 @@ function renderVote() {
   if (poll.id !== lastPollId) {
     lastPollId = poll.id;
     content.innerHTML = buildInput(poll);
+    // The grid's counter and draft wiring can only be attached once the markup
+    // exists, and must survive every later tick without being re-attached.
+    if (poll.type === 'worksheet') mountWorksheet(poll);
   }
   // Always refresh the "already answered" confirmation state.
   refreshVoteState(poll);
@@ -164,6 +169,41 @@ function buildInput(poll) {
       '<div style="height:10px"></div><button class="btn go full" onclick="submitWord(\'' + poll.id +
       '\')">Send</button><p class="small muted center" style="margin-top:8px">You can submit more than once.</p></div>';
   }
+  if (poll.type === 'worksheet') {
+    const rows = poll.rows || [];
+    const cols = poll.columns || [];
+    if (!rows.length || !cols.length) return q + '<div id="voteState"></div><div id="voteInputs"></div>';
+    // Restored INLINE, not after mount: a phone that reloads mid-worksheet must
+    // never flash nine empty boxes before the draft lands.
+    const draft = wsDraft(poll.id);
+    let filled = 0;
+    let groups = '';
+    for (const r of rows) {
+      let fields = '';
+      for (const c of cols) {
+        const key = r.id + c.id;
+        const val = String(draft[key] || '');
+        if (val.trim()) filled++;
+        fields +=
+          '<div class="ws-field"><label for="ws_' + key + '">' + esc(c.text) + '</label>' +
+          '<textarea id="ws_' + key + '" data-cell="' + key + '" maxlength="400" placeholder="Type here…">' +
+          esc(val) + '</textarea></div>';
+      }
+      // A row is a nested .card.tint so the card token inversion applies locally.
+      groups += '<div class="card tint ws-row"><h3 class="ws-row-name">' + esc(r.text) + '</h3>' +
+        '<div class="ws-fields" data-cols="' + cols.length + '">' + fields + '</div></div>';
+    }
+    return q +
+      (poll.instructions ? '<p class="ws-intro">' + esc(poll.instructions) + '</p>' : '') +
+      '<div id="voteState"></div>' +
+      '<div id="voteInputs">' +
+      (poll.rowHeader ? '<p class="eyebrow ws-head">' + esc(poll.rowHeader) + '</p>' : '') +
+      '<div id="wsGrid" data-poll="' + poll.id + '">' + groups + '</div>' +
+      (poll.footnote ? '<p class="ws-foot">' + esc(poll.footnote) + '</p>' : '') +
+      '<div class="ws-bar"><span class="ws-count" id="wsCount">' + wsCountText(filled, rows.length * cols.length) +
+      '</span><button class="btn go" id="wsSend" onclick="submitWorksheet(\'' + poll.id + '\')">Send</button></div>' +
+      '</div>';
+  }
   // open_text
   return q +
     '<div id="voteState"></div>' +
@@ -176,13 +216,17 @@ function refreshVoteState(poll) {
   const stateEl = document.getElementById('voteState');
   const inputs = document.getElementById('voteInputs');
   if (!stateEl) return;
-  // Multiple choice and rating are single-submit per device.
-  const singleSubmit = poll.type === 'multiple_choice' || poll.type === 'rating';
+  // Multiple choice, rating and worksheet are single-submit per device.
+  const singleSubmit = poll.type === 'multiple_choice' || poll.type === 'rating' || poll.type === 'worksheet';
   if (singleSubmit && isDone('poll_' + poll.id)) {
     if (inputs) inputs.classList.add('hidden');
+    const ws = poll.type === 'worksheet';
+    const n = done['poll_' + poll.id];
     stateEl.innerHTML =
-      '<div class="card tint center"><p class="eyebrow" style="margin:0 0 6px">Answer received</p>' +
-      '<p class="muted" style="margin:0">Watch the big screen for live results.</p></div>';
+      '<div class="card tint center"><p class="eyebrow" style="margin:0 0 6px">' +
+      (ws ? 'Worksheet received' : 'Answer received') + '</p><p class="muted" style="margin:0">' +
+      (ws && n > 1 ? n + ' boxes went to the host. Watch the big screen.' : 'Watch the big screen for live results.') +
+      '</p></div>';
   } else {
     if (inputs) inputs.classList.remove('hidden');
     stateEl.innerHTML = '';
@@ -242,6 +286,103 @@ async function upvote(qid) {
 
 function currentPoll() {
   return state.polls.find((p) => p.id === state.activePollId);
+}
+
+// ---- worksheet ------------------------------------------------------------
+// Nine boxes is ten minutes of typing. Everything below exists so that time
+// survives a reload, a phone call, or the host swapping the poll underneath.
+function wsKey(pollId) { return 'lp_ws_' + CODE + '_' + pollId; }
+
+function wsDraft(pollId) {
+  try { return JSON.parse(localStorage.getItem(wsKey(pollId)) || '{}') || {}; }
+  catch (e) { return {}; }   // private-mode / corrupt draft — start clean rather than blow up render
+}
+
+function wsCells() {
+  return Array.prototype.slice.call(document.querySelectorAll('#wsGrid textarea[data-cell]'));
+}
+function wsCountText(n, total) { return n + ' of ' + total + ' boxes filled — partial is fine'; }
+
+function mountWorksheet(poll) {
+  const grid = document.getElementById('wsGrid');
+  if (!grid) return;
+  const total = (poll.rows || []).length * (poll.columns || []).length;
+  // ONE delegated listener on the container. Nine inline handlers would mean nine
+  // closures rebuilt on every poll swap, and no place to hang the debounce.
+  grid.addEventListener('input', (e) => {
+    const t = e.target;
+    if (!t || !t.dataset || !t.dataset.cell) return;
+    const c = document.getElementById('wsCount');
+    if (c) c.textContent = wsCountText(wsCells().filter((x) => x.value.trim()).length, total);
+    wsQueueDraft(poll.id);
+  });
+}
+
+let wsTimer = null;
+let wsPending = null;   // { key, data } — snapshotted at keystroke, written on the timer
+
+// The snapshot is taken NOW and the write deferred, not the other way round: the
+// host can swap the active poll inside the debounce window, and a flush that read
+// the DOM at fire time would save the new poll's boxes under the old poll's key.
+function wsQueueDraft(pollId) {
+  const out = {};
+  for (const t of wsCells()) if (t.value.trim()) out[t.dataset.cell] = t.value;
+  wsPending = { key: wsKey(pollId), data: JSON.stringify(out) };
+  clearTimeout(wsTimer);
+  wsTimer = setTimeout(wsFlushDraft, 400);   // per-keystroke writes would thrash localStorage on a phone
+}
+
+function wsFlushDraft() {
+  clearTimeout(wsTimer);
+  wsTimer = null;
+  if (!wsPending) return;
+  try { localStorage.setItem(wsPending.key, wsPending.data); } catch (e) {}
+  wsPending = null;
+}
+
+function wsClearDraft(pollId) {
+  const k = wsKey(pollId);
+  // Drop a queued write for this poll too, or it would resurrect the draft we
+  // just cleared 400ms after a successful submit.
+  if (wsPending && wsPending.key === k) { clearTimeout(wsTimer); wsTimer = null; wsPending = null; }
+  try { localStorage.removeItem(k); } catch (e) {}
+}
+
+// iOS can freeze or discard a backgrounded tab before the debounce fires — and
+// that is exactly the participant who has typed the most.
+document.addEventListener('visibilitychange', () => { if (document.hidden) wsFlushDraft(); });
+window.addEventListener('pagehide', wsFlushDraft);
+
+async function submitWorksheet(pollId) {
+  if (isDone('poll_' + pollId) || inFlight[pollId]) return;
+  const cells = {};
+  let filled = 0;
+  for (const t of wsCells()) {
+    const v = t.value.trim();
+    if (v) { cells[t.dataset.cell] = v; filled++; }
+  }
+  if (!filled) { toast('Fill at least one box'); return; }
+  inFlight[pollId] = 1;
+  const btn = document.getElementById('wsSend');
+  if (btn) btn.disabled = true;
+  // The cells were snapshotted above but api() can retry for over a second. Left
+  // editable, anything typed in that window is neither sent nor kept: success
+  // clears the draft and hides the grid, so the sentence just disappears.
+  for (const t of wsCells()) t.readOnly = true;
+  try {
+    const r = await api('/poll/' + pollId + '/worksheet', { cells, author: NAME, source: 'typed' });
+    if (r.ok) {
+      wsClearDraft(pollId);
+      markDone('poll_' + pollId, filled);
+      refreshVoteState(currentPoll());
+      toast('Worksheet sent');
+    } else {
+      // The draft stays put — they can fix the wifi and hit Send again.
+      if (btn) btn.disabled = false;
+      for (const t of wsCells()) t.readOnly = false;
+      toast('Could not send — try again');
+    }
+  } finally { delete inFlight[pollId]; }
 }
 
 // ---- QA -------------------------------------------------------------------

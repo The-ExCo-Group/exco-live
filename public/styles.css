@@ -237,3 +237,35 @@ code { font-family: ui-monospace, Menlo, monospace; font-size: 0.92em; backgroun
 .js-code { margin: 30px 0 10px; font-size: clamp(46px, 8.5vw, 108px); }
 .js-url { color: var(--muted); font-size: clamp(15px, 1.8vw, 20px); margin: 0 0 22px; word-break: break-all; }
 .js-hint { color: var(--muted-2); font-size: clamp(13px, 1.4vw, 16px); margin: 0; }
+
+/* ---- Worksheet grid (participant) ----
+   A 3x3 table is unreadable on a phone, so the grid is stacked row-groups and
+   only becomes a table again at 900px. Each row-group is a .card.tint nested in
+   the vote card, so the neutral-token inversion above already lands its interior
+   dark-on-white — no colours are set here. */
+.ws-intro, .ws-foot { color: var(--muted); font-size: 14px; line-height: 1.55; white-space: pre-line; }
+.ws-intro { margin: -14px 0 22px; }
+.ws-foot { margin: 20px 0 0; padding-left: 13px; border-left: 2px solid var(--green); }
+.ws-head { margin: 0 0 12px; }
+.ws-row { padding: 18px; }
+.ws-row + .ws-row { margin-top: 14px; }
+.ws-row-name { font-family: var(--font-display); font-weight: 700; font-size: 19px; line-height: 1.15; margin: 0 0 14px; }
+.ws-fields { display: grid; gap: 14px; }
+/* Column headings are full questions — the global uppercase label is unreadable at that length. */
+.ws-field label { text-transform: none; letter-spacing: 0; font-size: 13px; line-height: 1.3; margin: 0 0 7px; }
+/* 16px exactly, or iOS zooms the page on focus and the participant loses the grid.
+   White on the tinted row-card, or the field disappears into it. */
+.ws-field textarea { font-size: 16px; min-height: 84px; background: var(--surface); }
+/* Sticky so the count and Send stay reachable from box 1 to box 9. Bled out to
+   the vote card's edges (hence -26px, its padding) and pinned at bottom:0 — any
+   gap under the bar shows a clipped strip of the box it is floating over. */
+.ws-bar { position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; gap: 12px; margin: 18px -26px -26px; padding: 14px 26px; background: var(--surface); border-top: 1px solid var(--line); border-radius: 0 0 var(--radius) var(--radius); }
+.ws-count { flex: 1; font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; line-height: 1.3; color: var(--muted); }
+
+@media (min-width: 900px) {
+  /* Side by side recovers the table reading the worksheet was drawn as. */
+  .ws-fields { grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .ws-fields[data-cols="1"] { grid-template-columns: 1fr; }
+  .ws-fields[data-cols="2"] { grid-template-columns: repeat(2, 1fr); }
+  .ws-fields[data-cols="4"] { grid-template-columns: repeat(4, 1fr); }
+}
