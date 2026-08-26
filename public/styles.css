@@ -287,3 +287,17 @@ code { font-family: ui-monospace, Menlo, monospace; font-size: 0.92em; backgroun
 .ws-field.ws-unread textarea { border-style: dashed; }
 .ws-cell-note { margin: 6px 0 0; font-size: 12px; line-height: 1.4; color: var(--muted); }
 .ws-cell-note.ws-note-unread { color: var(--text); }
+
+/* ---- Worksheet: several sheets from one device (participant) ----
+   The room fills these in on paper and one person per table photographs the
+   pile, so the same phone sends four to ten different people's sheets. The
+   label sits above the grid and the receipt above that — both outside #wsGrid,
+   which the reset between sheets empties. */
+.ws-label { margin: 0 0 18px; }
+.ws-label label { margin-top: 0; }
+.ws-label-hint { margin: 7px 0 0; }
+/* Numbered, because "four of my six are in" is the only question asked of it. */
+.ws-sent { margin: 0 0 20px; padding: 20px 22px; }
+.ws-sent-list { margin: 12px 0 0; padding-left: 21px; font-size: 14px; line-height: 1.5; }
+.ws-sent-list li { margin-top: 5px; }
+.ws-sent .btn + .ws-sent-list { margin-top: 18px; }

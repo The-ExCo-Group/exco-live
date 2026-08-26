@@ -191,6 +191,14 @@ function wsQuotes(label, list, accent) {
     list.map((q) => '<div class="response" style="white-space:pre-wrap;border-left-color:' + accent + '">' +
       esc(q) + '</div>').join('') + '</div>';
 }
+// howToSharpen is {answer, question} pairs, not strings — the answer is verbatim
+// and the question is what to put to whoever wrote it. Plain strings out, because
+// aiSection escapes what it is handed.
+function wsSharpen(list) {
+  return (Array.isArray(list) ? list : [])
+    .filter((e) => e && e.answer && e.question)
+    .map((e) => '“' + e.answer + '” — ' + e.question);
+}
 // Row by row in the sheet's own order: the facilitator reads the grid the way it
 // was printed, not the order boxes came back in. The server tallies against this
 // same grid, so a box it named is a box we can label.
@@ -334,7 +342,9 @@ function renderTypeFields() {
     el.innerHTML = '<p class="small muted">Participants submit words or short phrases that appear sized by frequency.</p>';
   } else if (type === 'worksheet') {
     el.innerHTML =
-      '<p class="small muted">Participants type into every box of a grid and submit it once. Rows × columns is the whole worksheet.</p>' +
+      '<p class="small muted">Participants fill in every box of a grid and submit it. Each submission is one person’s sheet, ' +
+      'so one phone can send in several — a stack of paper sheets photographed one by one — each with an optional label ' +
+      'such as a table number. Rows × columns is the whole worksheet.</p>' +
       '<button class="btn ghost sm" onclick="loadMfiWorksheet()">Load the Mentoring for Impact worksheet</button>' +
       '<label>Row header</label><input id="wsRowHeader" type="text" placeholder="What the rows are, e.g. Focus areas" />' +
       '<label>Rows — one per line (max 6)</label>' +
@@ -611,7 +621,9 @@ function renderStage() {
   const head =
     '<div class="row" style="align-items:center;margin-bottom:8px">' +
     '<span class="type-chip">' + TYPE_LABEL[poll.type] + '</span>' +
-    '<span class="pill right">' + poll.totalVotes + (isWs ? ' worksheets' : ' responses') + '</span>' +
+    // Worksheets, not people: ~80 sheets can arrive from ~15 phones.
+    '<span class="pill right">' + poll.totalVotes + ' ' + (isWs ? 'worksheet' : 'response') +
+    (poll.totalVotes === 1 ? '' : 's') + '</span>' +
     (canSynth ? '<button class="btn ghost sm" onclick="aiSynth(\'' + poll.id + '\')">AI: Synthesize</button>' : '') +
     (isWs ? '<button class="btn ghost sm" onclick="aiWorksheet(\'' + poll.id + '\')">AI: Analyse worksheet</button>' +
       '<button class="btn ghost sm" onclick="viewWorksheets(\'' + poll.id + '\')">View submissions</button>' : '') +
@@ -700,6 +712,55 @@ function renderResponses(poll) {
   return '<div class="responses">' + cards + '</div>';
 }
 
+// A label is whatever the person submitting typed — most usefully a table number.
+// The unlabelled bucket rides the tally as '' and is rendered, and sorted, last.
+const labelText = (v) => (v == null ? '' : String(v).trim());
+function labelOrder(a, b) {
+  if (!a.label !== !b.label) return a.label ? -1 : 1;
+  return a.label.localeCompare(b.label, undefined, { numeric: true });   // Table 10 after Table 2
+}
+
+// Grid bodies never ride a broadcast frame (publicRoom drops them), so the stage
+// breakdown has to be built from the counts that do: a {label: count} map, one
+// label per submitted grid, or grid stubs carrying a label. Nothing to show is a
+// silent breakdown, not a broken one.
+function wsLabelTally(poll) {
+  const src = poll.labelCounts || poll.gridLabels || ((poll.grids || []).length ? poll.grids : null);
+  if (!src) return [];
+  // Null prototype: labels are typed by the room, and on a plain {} the label
+  // "constructor" reads back a function rather than a count.
+  const counts = Object.create(null);
+  const bump = (k, n) => { const t = labelText(k); counts[t] = (counts[t] || 0) + n; };
+  if (Array.isArray(src)) {
+    // An entry with no count of its own is one grid: that shape is the labels themselves.
+    src.forEach((x) => (x && typeof x === 'object' ? bump(x.label, x.count == null ? 1 : Number(x.count) || 0) : bump(x, 1)));
+  } else {
+    Object.keys(src).forEach((k) => bump(k, Number(src[k]) || 0));
+  }
+  return Object.keys(counts).filter((k) => counts[k] > 0)
+    .map((k) => ({ label: k, count: counts[k] })).sort(labelOrder);
+}
+
+const MAX_LABEL_CHIPS = 14;   // a stage row, not a report: 15 tables fit, free text need not
+
+// "6 from Table 7, 4 from Table 3, 2 unlabelled" is the mid-session question once
+// sheets are being handed in a table at a time. Sorted by label and not by count:
+// these sit on a live screen, and a row that reshuffles itself every time a photo
+// lands cannot be read. Silent when nobody labels — the one-person-one-phone path.
+function wsLabelChips(poll) {
+  const tally = wsLabelTally(poll);
+  const named = tally.filter((t) => t.label);
+  if (!named.length) return '';
+  const chip = (text, n) => '<span class="pill">' + esc(text) + ' · ' + n + '</span>';
+  const spill = named.slice(MAX_LABEL_CHIPS);
+  const blank = tally.find((t) => !t.label);
+  return '<div class="row tight" style="align-items:center;margin:0 0 16px">' +
+    '<span class="type-chip">By label</span>' +
+    named.slice(0, MAX_LABEL_CHIPS).map((t) => chip(t.label, t.count)).join('') +
+    (spill.length ? chip(spill.length + ' more labels', spill.reduce((a, t) => a + t.count, 0)) : '') +
+    (blank ? chip('Unlabelled', blank.count) : '') + '</div>';
+}
+
 // Worksheet: the gradient moment is how many worksheets landed; the matrix is the
 // live signal. A box the room leaves blank is the one worth talking about, so the
 // thinnest cell is called out by name — the bodies themselves stay behind a fetch.
@@ -710,7 +771,10 @@ function renderWorksheetLive(poll) {
   const head =
     '<div class="row" style="align-items:baseline;gap:18px;margin-bottom:12px">' +
     '<div class="stat-big stat-grad">' + n + '</div>' +
-    '<div class="muted">worksheet' + (n === 1 ? '' : 's') + ' submitted</div></div>' +
+    // Sheets, never people: one phone can hand in a whole table's worth.
+    '<div class="muted">worksheet' + (n === 1 ? '' : 's') + ' submitted' +
+    '<span class="small" style="display:block">one grid per person — several can arrive from one phone</span></div></div>' +
+    wsLabelChips(poll) +
     (poll.instructions ? '<p class="small muted" style="margin:0 0 16px;max-width:76ch;white-space:pre-wrap">' + esc(poll.instructions) + '</p>' : '');
   if (!rows.length || !cols.length) return head + '<div class="empty">This worksheet has no grid.</div>';
   if (!n) return head + '<div class="empty">Waiting for the first worksheet…</div>';
@@ -742,8 +806,9 @@ function renderWorksheetLive(poll) {
     cols.map((c) => cell(r, c)).join('') + '</tr>').join('');
   const note = low.v < n
     ? '<p class="small muted" style="margin:16px 0 0">Thinnest box: <b>' + esc(low.r.text) + '</b> × <b>' +
-      esc(low.c.text) + '</b> — only ' + low.v + ' of ' + n + ' filled it in.</p>'
-    : '<p class="small muted" style="margin:16px 0 0">Every box filled by all ' + n + '.</p>';
+      esc(low.c.text) + '</b> — filled in on only ' + low.v + ' of ' + n + ' worksheets.</p>'
+    : '<p class="small muted" style="margin:16px 0 0">Every box filled in on ' +
+      (n === 1 ? 'the single worksheet' : 'all ' + n + ' worksheets') + '.</p>';
   return head + '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;min-width:520px">' +
     '<thead>' + thead + '</thead><tbody>' + tbody + '</tbody></table></div>' + note;
 }
@@ -818,7 +883,7 @@ async function viewWorksheets(pollId) {
   const grids = d.grids || [];
   if (!grids.length) { aiShow(title, '<p class="empty">No worksheets submitted yet.</p>'); return; }
   const boxes = rows.length * cols.length;
-  const html = grids.slice().reverse().map((g) => {
+  const card = (g, heading, sub) => {
     const cells = g.cells || {};
     const filled = Object.keys(cells).length;
     const body = rows.map((r) => {
@@ -831,12 +896,35 @@ async function viewWorksheets(pollId) {
       return '<p class="eyebrow" style="margin:14px 0 0">' + esc(r.text) + '</p><div class="responses">' + answers + '</div>';
     }).join('');
     return '<div class="card" style="margin-bottom:12px"><div class="row" style="align-items:center">' +
-      '<b style="font-family:var(--font-display);font-size:16px">' + esc(g.author || 'Anonymous') + '</b>' +
+      '<b style="font-family:var(--font-display);font-size:16px">' + esc(heading) + '</b>' +
+      (sub ? '<span class="small muted">' + esc(sub) + '</span>' : '') +
       '<span class="pill right">' + filled + ' of ' + boxes + ' boxes</span></div>' +
       (body || '<p class="small muted" style="margin:10px 0 0">Every box left blank.</p>') + '</div>';
-  }).join('');
-  aiShow(title, '<p class="sub">' + grids.length + ' worksheet' + (grids.length === 1 ? '' : 's') +
-    ', newest first.</p>' + html);
+  };
+  const sheets = (k) => k + ' worksheet' + (k === 1 ? '' : 's');
+
+  let lead, html;
+  if (!grids.some((g) => labelText(g.label))) {
+    // Nobody labelled — arrival order, newest first, so a sheet that lands while
+    // the panel is open sits at the top.
+    lead = sheets(grids.length) + ', newest first.';
+    html = grids.slice().reverse().map((g) => card(g, g.author || 'Anonymous', '')).join('');
+  } else {
+    // Grouped so the facilitator can say "table 7 said this". Inside a group the
+    // sheets keep the order they were handed in — the order the stack was
+    // photographed — which is how a table reads its own answers back.
+    const by = Object.create(null);   // labels are typed by the room; on a plain {} "constructor" is not an array
+    grids.forEach((g) => { const k = labelText(g.label); (by[k] || (by[k] = [])).push(g); });
+    const groups = Object.keys(by).map((k) => ({ label: k, count: by[k].length })).sort(labelOrder);
+    const named = groups.filter((t) => t.label).length;
+    lead = sheets(grids.length) + ' from ' + named + ' label' + (named === 1 ? '' : 's') + '.';
+    html = groups.map((t) =>
+      '<div class="row" style="align-items:baseline;margin:22px 0 10px">' +
+      '<p class="eyebrow" style="margin:0">' + esc(t.label || 'No label') + '</p>' +
+      '<span class="type-chip">' + sheets(t.count) + '</span></div>' +
+      by[t.label].map((g, i) => card(g, 'Worksheet ' + (i + 1), g.author || '')).join('')).join('');
+  }
+  aiShow(title, '<p class="sub">' + lead + '</p>' + html);
 }
 
 function renderQA() {

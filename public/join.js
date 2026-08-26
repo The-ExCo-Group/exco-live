@@ -7,11 +7,11 @@ let state = null;
 let ME = localStorage.getItem('lp_me');
 if (!ME) { ME = Math.random().toString(36).slice(2) + Date.now().toString(36); localStorage.setItem('lp_me', ME); }
 
-// Track what this device has already done, keyed by poll/question id
+// Track what this device has already done, keyed by poll/question id. Only the
+// single-submit types are here: one device can send many worksheets, so that
+// type keeps its own record of every sheet instead (wsSentList).
 const done = JSON.parse(localStorage.getItem('lp_done_' + CODE) || '{}');
-// The stored value is a marker, not a flag — worksheet records how many boxes
-// went in so the confirmation can say so. isDone() only ever reads truthiness.
-function markDone(k, v) { done[k] = v || 1; localStorage.setItem('lp_done_' + CODE, JSON.stringify(done)); }
+function markDone(k) { done[k] = 1; localStorage.setItem('lp_done_' + CODE, JSON.stringify(done)); }
 function isDone(k) { return !!done[k]; }
 
 // Participant name — remembered on this device across sessions. Answering
@@ -161,7 +161,7 @@ function wsTypedRecap() {
     });
   });
   return html ? '<div style="margin-top:12px;border-top:1px solid var(--line);padding-top:4px">' +
-    '<p class="eyebrow" style="margin:8px 0 0">What you wrote</p>' + html + '</div>' : '';
+    '<p class="eyebrow" style="margin:8px 0 0">What was in the boxes</p>' + html + '</div>' : '';
 }
 function noticeClear() {
   const box = document.getElementById('joinNotice');
@@ -309,8 +309,15 @@ function buildInput(poll) {
       '<div class="ws-photo" id="wsPhotoIntro">' +
       '<input type="file" id="wsPhotoFile" class="hidden" accept="image/*" capture="environment" onchange="wsPhotoPicked(this)" />' +
       '<button class="btn ghost sm" id="wsPhotoBtn" onclick="wsPhotoPick()">Use a photo instead</button>' +
-      '<span class="small muted ws-photo-hint">Filled it in on paper? Photograph the sheet and we\'ll type it up for you to check.</span>' +
+      '<span class="small muted ws-photo-hint">Sheet filled in on paper? Photograph it and we\'ll type it up for you to check.</span>' +
       '</div><div id="wsPhotoMsg"></div>' +
+      // Optional, and pointedly not a name: anyone holding the room code can open
+      // this page, and a sheet photographed for someone else is not the
+      // photographer's to attribute. A table number says enough for the analysis.
+      '<div class="ws-label"><label for="wsLabel">Label this sheet (optional)</label>' +
+      '<input id="wsLabel" type="text" maxlength="40" placeholder="e.g. Table 7" value="' + esc(wsLabelGet()) +
+      '" oninput="wsLabelKeep(this)" />' +
+      '<p class="small muted ws-label-hint">A table or group number helps the host sort the sheets. Please don\'t use anyone\'s name — this session has no sign-in.</p></div>' +
       (poll.rowHeader ? '<p class="eyebrow ws-head">' + esc(poll.rowHeader) + '</p>' : '') +
       '<div id="wsGrid" data-poll="' + poll.id + '">' + groups + '</div>' +
       (poll.footnote ? '<p class="ws-foot">' + esc(poll.footnote) + '</p>' : '') +
@@ -334,17 +341,17 @@ function refreshVoteState(poll) {
   // question, and reading .type off nothing would throw away the confirmation
   // toast for a submission the server had already accepted.
   if (!stateEl || !poll) return;
-  // Multiple choice, rating and worksheet are single-submit per device.
-  const singleSubmit = poll.type === 'multiple_choice' || poll.type === 'rating' || poll.type === 'worksheet';
+  // A worksheet is the one type a single device sends several of — one paper
+  // sheet per person, all photographed from the same phone — so it never seals
+  // itself off after a send and runs its own state below.
+  if (poll.type === 'worksheet') return wsRefreshState(poll, stateEl, inputs);
+  // Multiple choice and rating are single-submit per device.
+  const singleSubmit = poll.type === 'multiple_choice' || poll.type === 'rating';
   if (singleSubmit && isDone('poll_' + poll.id)) {
     if (inputs) inputs.classList.add('hidden');
-    const ws = poll.type === 'worksheet';
-    const n = done['poll_' + poll.id];
     stateEl.innerHTML =
-      '<div class="card tint center"><p class="eyebrow" style="margin:0 0 6px">' +
-      (ws ? 'Worksheet received' : 'Answer received') + '</p><p class="muted" style="margin:0">' +
-      (ws && n > 1 ? n + ' boxes went to the host. Watch the big screen.' : 'Watch the big screen for live results.') +
-      '</p></div>';
+      '<div class="card tint center"><p class="eyebrow" style="margin:0 0 6px">Answer received</p>' +
+      '<p class="muted" style="margin:0">Watch the big screen for live results.</p></div>';
   } else {
     if (inputs) inputs.classList.remove('hidden');
     stateEl.innerHTML = '';
@@ -440,7 +447,10 @@ function wsDraft(pollId) {
 function wsCells() {
   return Array.prototype.slice.call(document.querySelectorAll('#wsGrid textarea[data-cell]'));
 }
-function wsCountText(n, total) { return n + ' of ' + total + ' boxes filled — partial is fine'; }
+// "1 of 1 box" — a one-column worksheet is a real shape, and the count line,
+// the confirmation and the receipt all read off this.
+function wsBoxes(n, total) { return n + ' of ' + total + (total === 1 ? ' box' : ' boxes'); }
+function wsCountText(n, total) { return wsBoxes(n, total) + ' filled — partial is fine'; }
 function wsTotal(poll) { return (poll.rows || []).length * (poll.columns || []).length; }
 // Shared, because the photo path sets .value directly and no 'input' event fires
 // for it — the count would sit at the pre-photo number until the next keystroke.
@@ -454,6 +464,11 @@ function mountWorksheet(poll) {
   if (!grid) return;
   const total = wsTotal(poll);
   wsPhotoReset();
+  wsCardHtml = null;   // a brand-new #voteState node — nothing has been painted on it
+  // A reload after a send comes back to the confirmation, not to an empty grid
+  // that invites the same sheet a second time. An unsaved draft outranks it:
+  // that is a sheet in progress, and it is already back in the boxes.
+  wsMode = wsSentList(poll.id).length && !Object.keys(wsDraft(poll.id)).length ? 'sent' : 'entering';
   // ONE delegated listener on the container. Nine inline handlers would mean nine
   // closures rebuilt on every poll swap, and no place to hang the debounce.
   grid.addEventListener('input', (e) => {
@@ -508,8 +523,133 @@ function wsClearDraft(pollId) { clearDraft(wsKey(pollId)); }
 document.addEventListener('visibilitychange', () => { if (document.hidden) wsFlushDraft(); });
 window.addEventListener('pagehide', wsFlushDraft);
 
+// ---- worksheet: many sheets, one device ------------------------------------
+// The room fills these in on PAPER and one person per table photographs their
+// table's pile, so a single phone carries four to ten DIFFERENT people's sheets.
+// Two things follow. The poll cannot be single-submit; and the device needs a
+// record of what actually went through, because a pile of paper is the only
+// other thing to check against. Someone typing their own single sheet meets the
+// same machinery with one line in it, which is why none of the copy below says
+// "table" or "your worksheet".
+let wsMode = 'entering';   // 'sent' keeps the grid behind the confirmation until a fresh one is asked for
+let wsGen = 0;             // one per sheet: a read of the LAST sheet must never land in this one's boxes
+let wsCardHtml = null;     // what wsRefreshState last painted — see the note there
+
+// Held in memory, mirrored to storage — never read back out of it. iOS private
+// browsing lets setItem throw while getItem keeps working, and a confirmation
+// that depends on a write succeeding leaves a captain with seven sheets still
+// to send looking at a hidden grid and an empty panel.
+const wsSent = {};   // pollId -> entries, seeded from storage on mount
+function wsSentKey(pollId) { return 'lp_wss_' + CODE + '_' + pollId; }
+function wsSentSeed(pollId) {
+  if (wsSent[pollId]) return;
+  try {
+    const v = JSON.parse(localStorage.getItem(wsSentKey(pollId)) || '[]');
+    wsSent[pollId] = Array.isArray(v) ? v : [];
+  } catch (e) { wsSent[pollId] = []; }   // private mode — an empty record beats a broken render
+}
+function wsSentList(pollId) { wsSentSeed(pollId); return wsSent[pollId]; }
+// Capped: a captain carries ten sheets, not forty, and the tail is what matters.
+function wsSentAdd(pollId, entry) {
+  const list = wsSentList(pollId).concat([entry]).slice(-40);
+  wsSent[pollId] = list;
+  try { localStorage.setItem(wsSentKey(pollId), JSON.stringify(list)); } catch (e) {}
+}
+
+// Remembered per ROOM, not per poll and not per sheet: whoever is carrying a
+// table's paper is on that table all session, and should type "Table 7" once.
+function wsLabelKey() { return 'lp_wslabel_' + CODE; }
+function wsLabelGet() { try { return localStorage.getItem(wsLabelKey()) || ''; } catch (e) { return ''; } }
+// Written straight through rather than through queueDraft: that shelf holds ONE
+// pending write, and a label keystroke would evict the grid's own snapshot.
+function wsLabelKeep(el) { try { localStorage.setItem(wsLabelKey(), el.value.slice(0, 40)); } catch (e) {} }
+function wsLabelValue() {
+  const el = document.getElementById('wsLabel');
+  return el ? el.value.trim().slice(0, 40) : '';
+}
+
+function wsSentRow(s) {
+  const d = s.ts ? new Date(s.ts) : null;
+  const time = d && !isNaN(d.getTime()) ? ' · ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+  return '<li>' + (s.label ? '<b>' + esc(s.label) + '</b> · ' : '') + wsBoxes(s.n, s.total) + ' · ' +
+    (s.source === 'photo' ? 'from a photo' : 'typed') + time + '</li>';
+}
+
+// The receipt. Numbered, because "four of my six are in" is the only question
+// being asked of it, and it has to survive a reload — a phone that drops the
+// list halfway through a pile sends someone's sheet twice or not at all.
+function wsSentCard(pollId) {
+  const list = wsSentList(pollId);
+  if (!list.length) return '';
+  const last = list[list.length - 1];
+  let rows = '';
+  for (const s of list) rows += wsSentRow(s);
+  let head = '<p class="eyebrow" style="margin:0 0 6px">Sent from this device</p>';
+  // The action sits ABOVE the record, not under it: ten sent sheets would push
+  // the only way back to a blank grid off the bottom of a phone.
+  if (wsMode === 'sent') {
+    head = '<p class="eyebrow" style="margin:0 0 6px">Worksheet sent</p>' +
+      '<p class="muted" style="margin:0">' + wsBoxes(last.n, last.total) + ' went to the host' +
+      (last.label ? ', labelled “' + esc(last.label) + '”' : '') + '. Watch the big screen for live results.</p>' +
+      '<p class="small muted" style="margin:16px 0 10px">Another sheet to send? Start a fresh one — each worksheet is counted as one person.</p>' +
+      '<button class="btn ghost" onclick="wsAddAnother(\'' + pollId + '\')">Add another worksheet</button>';
+  }
+  return '<div class="card tint ws-sent">' + head + '<ol class="ws-sent-list">' + rows + '</ol></div>';
+}
+
+// Repainted only when it actually changes. In a room this size an SSE tick lands
+// every time anyone submits anything, and rebuilding this card under a finger is
+// how a tap on "Add another worksheet" gets swallowed.
+function wsRefreshState(poll, stateEl, inputs) {
+  if (inputs) inputs.classList.toggle('hidden', wsMode === 'sent');
+  const html = wsSentCard(poll.id);
+  if (html === wsCardHtml) return;
+  wsCardHtml = html;
+  stateEl.innerHTML = html;
+}
+
+// The next sheet is a DIFFERENT person's. Anything left behind here is filed
+// under the wrong participant, so this clears the boxes, the saved draft and
+// every marker the photo lane left, and bumps the generation so a read still in
+// flight for the last sheet cannot land in these boxes. Two things stay on
+// purpose: the label, which names a table and not a person, and wsOcrBusy —
+// releasing that would put a second OCR call on the room from one device.
+function wsResetSheet(pollId) {
+  wsGen++;
+  wsOcrRaw = null;
+  wsOcrApplied = {};
+  for (const t of wsCells()) {
+    t.value = '';
+    t.readOnly = false;   // the send that just succeeded locked them
+    const field = t.closest('.ws-field') || t.parentNode;
+    field.classList.remove('ws-from-photo', 'ws-unread');
+    wsCellNote(field, '');
+  }
+  wsClearDraft(pollId);   // drops the queued write too, which would otherwise restore the sheet 400ms later
+  const msg = document.getElementById('wsPhotoMsg');
+  if (msg) msg.innerHTML = '';
+  const intro = document.getElementById('wsPhotoIntro');
+  if (intro) intro.classList.remove('hidden');
+  const btn = document.getElementById('wsPhotoBtn');
+  if (btn) btn.disabled = wsOcrBusy;   // still reading the last sheet's photo — the lock stands
+  const send = document.getElementById('wsSend');
+  if (send) send.disabled = false;
+  wsSyncCount(wsCells().length);
+}
+
+function wsAddAnother(pollId) {
+  const poll = currentPoll();
+  if (!poll || poll.id !== pollId || !wsGridIs(pollId)) return;   // host has moved on; there is no grid to clear
+  wsResetSheet(pollId);
+  wsMode = 'entering';
+  refreshVoteState(poll);
+  // Ten sent sheets push the empty grid well below the fold.
+  const inputs = document.getElementById('voteInputs');
+  if (inputs) inputs.scrollIntoView(true);
+}
+
 async function submitWorksheet(pollId) {
-  if (isDone('poll_' + pollId) || inFlight[pollId]) return;
+  if (inFlight[pollId]) return;
   const cells = {};
   let filled = 0;
   for (const t of wsCells()) {
@@ -517,6 +657,16 @@ async function submitWorksheet(pollId) {
     if (v) { cells[t.dataset.cell] = v; filled++; }
   }
   if (!filled) { toast('Fill at least one box'); return; }
+  const total = wsCells().length;
+  // Snapshotted with the cells: api() can retry for over a second, and the
+  // record has to say what was actually attached to this submission.
+  const label = wsLabelValue();
+  const source = wsOcrRaw ? 'photo' : 'typed';
+  // Once this device has sent one sheet it is carrying somebody else's paper,
+  // and a sheet photographed for someone else is not the photographer's to sign
+  // — the label says which table it came from, which is all the analysis wants.
+  // The first sheet keeps the name: that is the individual filling in their own.
+  const author = wsSentList(pollId).length ? '' : NAME;
   wsFlushDraft();   // the shelf must already match the screen before the send that might fail
   inFlight[pollId] = 1;
   const btn = document.getElementById('wsSend');
@@ -529,14 +679,20 @@ async function submitWorksheet(pollId) {
     // The pre-edit transcription rides along with the corrected cells: the gap
     // between the two is the only honest answer to "is OCR good enough for this
     // room's handwriting", and it costs ~1 KB with none of the photo's PII.
-    const r = await api('/poll/' + pollId + '/worksheet', wsOcrRaw
-      ? { cells, author: NAME, source: 'photo', ocrRaw: wsOcrRaw }
-      : { cells, author: NAME, source: 'typed' });
+    const r = await api('/poll/' + pollId + '/worksheet', source === 'photo'
+      ? { cells, label, author, source, ocrRaw: wsOcrRaw }
+      : { cells, label, author, source });
     if (r.ok) {
+      // This sheet is closed. Bumping the generation is what stops a photo still
+      // being read for it from landing in the next person's boxes — or writing a
+      // draft that a reload would restore into them.
+      wsGen++;
       wsClearDraft(pollId);
       noticeClear();
-      markDone('poll_' + pollId, filled);
-      refreshVoteState(currentPoll());
+      wsSentAdd(pollId, { label, n: filled, total, source, ts: Date.now() });
+      const p = currentPoll();
+      // The host can advance mid-send; this confirmation belongs to THIS grid only.
+      if (p && p.id === pollId) { wsMode = 'sent'; refreshVoteState(p); }
       toast('Worksheet sent');
     } else {
       // The draft stays put, and the boxes go back to editable — whatever the
@@ -546,7 +702,7 @@ async function submitWorksheet(pollId) {
       // that tells them where their answers actually went.
       if (btn) btn.disabled = false;
       for (const t of wsCells()) t.readOnly = false;
-      await sendFailed(r, 'your worksheet', true, wsTypedRecap());
+      await sendFailed(r, 'this worksheet', true, wsTypedRecap());
     }
   } finally { delete inFlight[pollId]; }
 }
@@ -576,6 +732,7 @@ let wsStatusTimer = null;
 
 function wsPhotoReset() {
   wsStatusStop();
+  wsGen++;
   wsOcrBusy = false;
   wsOcrRaw = null;
   wsOcrApplied = {};
@@ -605,20 +762,21 @@ async function wsPhotoPicked(input) {
   input.value = '';   // without this, re-picking the SAME photo fires no change event at all
   if (!file || wsOcrBusy) return;
   const poll = currentPoll();
-  if (!poll || poll.type !== 'worksheet' || !wsGridIs(poll.id) || isDone('poll_' + poll.id)) return;
+  if (!poll || poll.type !== 'worksheet' || !wsGridIs(poll.id)) return;
   const pollId = poll.id;
+  const gen = wsGen;   // this read belongs to the sheet that is in the boxes NOW
   wsOcrBusy = true;
   const btn = document.getElementById('wsPhotoBtn');
   if (btn) btn.disabled = true;
   wsPhotoNote(pollId, 'Reading your photo — this takes a few seconds.', false);
-  wsStatusStart(pollId);
+  wsStatusStart(pollId, gen);
   try {
     let b64;
     try { b64 = await wsShrink(file); }
     catch (e) {
       return wsPhotoNote(pollId, e && e.message === 'too_big'
-        ? 'That photo is still too large to send even after shrinking it. Try again in better light, or type your answers in.'
-        : 'That file could not be read as a photo. Try another one, or type your answers in.', true);
+        ? 'That photo is still too large to send even after shrinking it. Try again in better light, or type the answers in.'
+        : 'That file could not be read as a photo. Try another one, or type the answers in.', true);
     }
     let res;
     let data;
@@ -632,17 +790,21 @@ async function wsPhotoPicked(input) {
       });
       data = await res.json().catch(() => ({}));
     } catch (e) {
-      return wsPhotoNote(pollId, 'We could not reach the server. Check your signal and try again, or type your answers in.', true);
+      return wsPhotoNote(pollId, 'We could not reach the server. Check your signal and try again, or type the answers in.', true);
     }
-    if (!wsGridIs(pollId) || isDone('poll_' + pollId)) return;
+    if (!wsGridIs(pollId)) return;
+    // The sheet this photo was taken of has been sent, and the boxes are now the
+    // next person's. An unused read costs a retake; a read filed under the wrong
+    // participant cannot be spotted at all.
+    if (gen !== wsGen) return wsPhotoNote(pollId, 'That photo was of a worksheet that has already been sent, so nothing was added to these boxes.', true);
     // submitWorksheet snapshotted the cells before it started retrying. Filling
     // boxes now would show text that is not in what the host is about to receive.
-    if (inFlight[pollId]) return wsPhotoNote(pollId, 'Your worksheet was already on its way to the host, so nothing from the photo was added.', false);
+    if (inFlight[pollId]) return wsPhotoNote(pollId, 'This worksheet was already on its way to the host, so nothing from the photo was added.', false);
     // No AI at all, and a key the API refuses, are the failures no photo can get
     // past — those get no retry button. A truncated or refused read is about
     // THIS photo, so another one is still worth offering.
     if (!res.ok) return wsPhotoNote(pollId, wsHttpMessage(res.status, data), !WS_NO_RETRY[data.error]);
-    if (data.match === false) return wsPhotoNote(pollId, data.message || 'Nothing could be read from that photo. Try another one, or type your answers in.', true);
+    if (data.match === false) return wsPhotoNote(pollId, data.message || 'Nothing could be read from that photo. Try another one, or type the answers in.', true);
     wsApplyOcr(poll, data);
   } finally {
     wsStatusStop();
@@ -665,22 +827,22 @@ function wsPhotoNote(pollId, text, retry) {
 }
 
 function wsHttpMessage(status, d) {
-  if (status === 413 || d.error === 'payload_too_large') return 'That photo was too large to send. Try again in better light, or type your answers in.';
-  if (d.error === 'ai_not_configured') return 'Reading photos is not switched on for this session — please type your answers in.';
+  if (status === 413 || d.error === 'payload_too_large') return 'That photo was too large to send. Try again in better light, or type the answers in.';
+  if (d.error === 'ai_not_configured') return 'Reading photos is not switched on for this session — please type the answers in.';
   // A rejected key is not this photo's fault and no photo will get past it. The
   // server's own message names the environment variable, which is for the
   // facilitator's logs, not a phone — so this says what the participant can do
   // and who has to fix it.
-  if (d.error === 'ai_key_rejected') return 'Photo reading is misconfigured for this session — the AI key was rejected. Let the host know, and type your answers in.';
-  if (d.error === 'ai_truncated') return 'There was too much on that photo to read in one go. Try a photo of one row at a time, or type your answers in.';
-  if (d.error === 'ai_refused') return 'The reader would not transcribe that photo. Try another one, or type your answers in.';
+  if (d.error === 'ai_key_rejected') return 'Photo reading is misconfigured for this session — the AI key was rejected. Let the host know, and type the answers in.';
+  if (d.error === 'ai_truncated') return 'There was too much on that photo to read in one go. Try a photo of one row at a time, or type the answers in.';
+  if (d.error === 'ai_refused') return 'The reader would not transcribe that photo. Try another one, or type the answers in.';
   if (status === 503) {
     const s = d.retryAfterSeconds;
-    return 'Photos are queued right now — try again in ' + (s > 0 ? 'about ' + s + 's' : 'a moment') + ', or type your answers in.';
+    return 'Photos are queued right now — try again in ' + (s > 0 ? 'about ' + s + 's' : 'a moment') + ', or type the answers in.';
   }
   if (status === 409 || status === 404) return 'The host has moved on from this worksheet, so nothing was read.';
-  if (status === 400) return 'That file could not be read as a photo. Try another one, or type your answers in.';
-  return 'Something went wrong reading that photo. Try another one, or type your answers in.';
+  if (status === 400) return 'That file could not be read as a photo. Try another one, or type the answers in.';
+  return 'Something went wrong reading that photo. Try another one, or type the answers in.';
 }
 
 // ---- downscale ------------------------------------------------------------
@@ -775,7 +937,7 @@ function wsApplyOcr(poll, data) {
     if (wasOurs && !says) {
       wsOcrApplied[key] = prev[key];   // still ours, so a third retake can replace it
       field.classList.add('ws-from-photo');
-      wsCellNote(field, 'From your photo — check it', 'ws-note-photo');
+      wsCellNote(field, 'From the photo — check it', 'ws-note-photo');
       carried++;
       continue;
     }
@@ -788,13 +950,13 @@ function wsApplyOcr(poll, data) {
       t.value = text;
       wsOcrApplied[key] = text;
       field.classList.add('ws-from-photo');
-      wsCellNote(field, 'From your photo — check it', 'ws-note-photo');
+      wsCellNote(field, 'From the photo — check it', 'ws-note-photo');
       n++;
     } else if (unread.has(key)) {
       // Left empty on purpose and said so. A guess here reads as correct and
       // gets submitted; a gap is the one thing they can see and fix.
       field.classList.add('ws-unread');
-      wsCellNote(field, 'We couldn\'t read your handwriting here', 'ws-note-unread');
+      wsCellNote(field, 'We couldn\'t read the handwriting here', 'ws-note-unread');
       m++;
     }
   }
@@ -804,9 +966,9 @@ function wsApplyOcr(poll, data) {
   wsSyncCount(wsTotal(poll));
   wsQueueDraft(poll.id);   // photo text is a draft like any other — a reload must not lose it
   wsPhotoNote(poll.id, 'We filled in ' + n + (n === 1 ? ' box' : ' boxes') + ', couldn\'t read ' + m +
-    ', and left ' + kept + ' you\'d already typed' +
-    (carried ? ' and ' + carried + ' from your last photo' : '') +
-    '. Read it over, fix anything wrong, then submit.', true);
+    ', and left ' + kept + ' already filled in' +
+    (carried ? ' and ' + carried + ' from the last photo' : '') +
+    '. Read it over, fix anything wrong, then send.', true);
 }
 
 // One note element per box, reused rather than appended, or a second photo would
@@ -820,10 +982,10 @@ function wsCellNote(field, text, cls) {
 }
 
 // ---- queue position -------------------------------------------------------
-function wsStatusStart(pollId) {
+function wsStatusStart(pollId, gen) {
   wsStatusStop();
-  wsStatusTimer = setInterval(() => wsStatusTick(pollId), WS_STATUS_MS);
-  wsStatusTick(pollId);
+  wsStatusTimer = setInterval(() => wsStatusTick(pollId, gen), WS_STATUS_MS);
+  wsStatusTick(pollId, gen);
 }
 function wsStatusStop() { clearInterval(wsStatusTimer); wsStatusTimer = null; }
 
@@ -831,15 +993,17 @@ function wsStatusStop() { clearInterval(wsStatusTimer); wsStatusTimer = null; }
 // wait, and a participant who knows that goes back to typing instead of
 // re-taking it. The depth counts THIS photo, hence the -1. A server without the
 // endpoint is not a failure worth reporting — the generic line just stays.
-async function wsStatusTick(pollId) {
-  if (!wsOcrBusy) return;
+async function wsStatusTick(pollId, gen) {
+  // The generation moves on when the sheet is sent: a queue position for a read
+  // nothing will use belongs on nobody's screen.
+  if (!wsOcrBusy || gen !== wsGen) return wsStatusStop();
   let d;
   try {
     const r = await fetch('/api/ocr-status');
     if (!r.ok) return wsStatusStop();
     d = await r.json();
   } catch (e) { return; }
-  if (!wsOcrBusy || !wsGridIs(pollId) || !d) return;
+  if (!wsOcrBusy || gen !== wsGen || !wsGridIs(pollId) || !d) return;
   const ahead = Math.max(0, (d.running || 0) + (d.waiting || 0) - 1);
   const eta = d.etaSeconds > 0 ? ', about ' + d.etaSeconds + 's' : '';
   wsPhotoNote(pollId, ahead

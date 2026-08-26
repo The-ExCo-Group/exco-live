@@ -343,16 +343,34 @@ function renderResult(p) {
     if (!grids.length || !rows.length || !cols.length) return '<p class="muted small">No worksheets submitted.</p>';
     const n = grids.length;
     const answersFor = (key) => grids
-      .map((g) => ({ text: String((g.cells || {})[key] || '').trim(), author: g.author, photo: g.source === 'photo' }))
+      .map((g) => ({
+        text: String((g.cells || {})[key] || '').trim(), author: g.author,
+        label: String(g.label || '').trim(), photo: g.source === 'photo',
+      }))
       .filter((a) => a.text);
+    // One device can submit many sheets — a table captain photographs everyone's
+    // paper at their table — so the label is what tells those sheets apart in an
+    // archived session. Array, not a {} tally: a label of "constructor" reads back
+    // a function on a plain object.
+    const labels = [];
+    let labelled = 0;
+    grids.forEach((g) => {
+      const l = String(g.label || '').trim();
+      if (!l) return;
+      labelled++;
+      if (labels.indexOf(l) < 0) labels.push(l);
+    });
     // Photo answers were OCR'd and then reviewed by the participant before they
     // submitted, so they are as trustworthy as typed ones — but a facilitator
     // querying an odd wording wants to know a camera was in the chain. Anonymous
     // is normal here, so the marker cannot hang off a name.
     const meta = (a) => {
-      const name = a.author ? '— ' + esc(a.author) : '';
-      const src = a.photo ? (name ? ' · from photo' : 'From photo') : '';
-      return (name || src) ? '<div class="small muted" style="margin-top:6px">' + name + src + '</div>' : '';
+      const bits = [];
+      if (a.label) bits.push(esc(a.label));
+      // The em dash only reads as an attribution when the name leads the line.
+      if (a.author) bits.push((bits.length ? '' : '— ') + esc(a.author));
+      if (a.photo) bits.push(bits.length ? 'from photo' : 'From photo');
+      return bits.length ? '<div class="small muted" style="margin-top:6px">' + bits.join(' · ') + '</div>' : '';
     };
     let filled = 0, html = '';
     rows.forEach((r) => {
@@ -371,9 +389,14 @@ function renderResult(p) {
           : '<p class="muted small" style="margin:0">Nobody answered this box.</p>';
       });
     });
+    // Spelling out how many sheets carried a label keeps the count honest when a
+    // room mixes labelled table batches with people filling in their own sheet.
+    const from = !labels.length ? ''
+      : labelled === n ? ' from ' + plural(labels.length, 'table')
+        : ' · ' + labelled + ' from ' + plural(labels.length, 'table');
     // Numerators and denominators here are the sums of the per-box counts below,
     // so the headline can be checked against the detail.
-    return '<p class="muted small" style="margin:0">' + plural(n, 'worksheet') + ' · ' +
+    return '<p class="muted small" style="margin:0">' + plural(n, 'worksheet') + from + ' · ' +
       filled + ' of ' + (n * rows.length * cols.length) + ' boxes filled</p>' + html;
   }
   // open_text
