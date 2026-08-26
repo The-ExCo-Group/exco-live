@@ -88,6 +88,7 @@ async function api(pathSuffix, body) {
   // the SAME sid so the server's de-dupe counts it once. Minting it per attempt would double-count.
   const payload = JSON.stringify(Object.assign({}, body || {}, { sid: newSid() }));
   const url = '/api/room/' + CODE + pathSuffix;
+  let last = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const res = await fetch(url, {
@@ -97,12 +98,16 @@ async function api(pathSuffix, body) {
       });
       // 4xx is the server's real verdict — resending won't change it. Only 5xx is worth another go.
       if (res.status < 500) return res;
+      // Kept unread: a 503 that survives all three attempts is still the server
+      // telling us it is shedding load, and throwing it away here is what turned
+      // "we're catching up, try in 20s" into the generic "could not send".
+      last = res;
     } catch (e) {
       // Network dropped (flaky conference wifi) — fall through and try again.
     }
     if (attempt < 2) await new Promise((r) => setTimeout(r, 300 * (attempt + 1) + Math.random() * 200));
   }
-  return { ok: false, status: 0 }; // shaped like a failed Response; callers only read .ok
+  return last || { ok: false, status: 0 }; // status 0 = never got a reply; callers read .ok and .status
 }
 
 function toast(msg) {
@@ -110,6 +115,87 @@ function toast(msg) {
   t.textContent = msg;
   t.classList.add('show');
   setTimeout(() => t.classList.remove('show'), 1600);
+}
+
+// ---- failed submissions ---------------------------------------------------
+// A card above the question, not a toast. By the time a submission fails the
+// host has often already swapped the question out — the input the participant
+// was looking at is gone, and 1.6 seconds at the bottom of the screen is not
+// where you tell someone their ten minutes of typing did not send. Built here
+// rather than in join.html so render() never has to know about it: it lives
+// outside #voteContent, which renderVote rewrites wholesale on every poll swap.
+function noticeBox() {
+  let box = document.getElementById('joinNotice');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'joinNotice';
+    const panel = document.getElementById('panelVote');
+    panel.insertBefore(box, panel.firstChild);
+  }
+  return box;
+}
+function notice(label, text, extraHtml) {
+  noticeBox().innerHTML =
+    '<div class="card tint"><p class="eyebrow" style="margin:0 0 6px">' + esc(label) + '</p>' +
+    '<p class="muted" style="margin:0">' + esc(text) + '</p>' +
+    (extraHtml || '') +
+    '<div style="height:12px"></div><button class="btn ghost sm" onclick="noticeClear()">Got it</button></div>';
+}
+
+// A closed poll hides the grid, so "nothing you typed has been lost" lands on an
+// empty screen and reads as false. Show the answers back instead — seeing the
+// words is the only thing that actually settles it. Read straight off the DOM:
+// by the time a 409 arrives the host has advanced and currentPoll() is null, so
+// the poll object is not there to ask.
+function wsTypedRecap() {
+  let html = '';
+  document.querySelectorAll('.ws-row').forEach((row) => {
+    const rowName = (row.querySelector('.ws-row-name') || {}).textContent || '';
+    row.querySelectorAll('.ws-field').forEach((field) => {
+      const ta = field.querySelector('textarea');
+      const v = ta && ta.value.trim();
+      if (!v) return;
+      const col = (field.querySelector('label') || {}).textContent || '';
+      html += '<p class="small" style="margin:10px 0 0"><b>' + esc(rowName) + '</b> · ' + esc(col) + '</p>' +
+        '<p class="small muted" style="margin:2px 0 0;white-space:pre-wrap">' + esc(v) + '</p>';
+    });
+  });
+  return html ? '<div style="margin-top:12px;border-top:1px solid var(--line);padding-top:4px">' +
+    '<p class="eyebrow" style="margin:8px 0 0">What you wrote</p>' + html + '</div>' : '';
+}
+function noticeClear() {
+  const box = document.getElementById('joinNotice');
+  if (box) box.innerHTML = '';
+}
+
+// The one exit for every failed submission. `what` names what did not go ("your
+// vote", "your worksheet"); `kept` says whether the text is still on this
+// device, which is the only sentence worth reading when a full grid bounces.
+async function sendFailed(res, what, kept, extraHtml) {
+  const status = res.status || 0;
+  // status 0 is api()'s own "three attempts, no reply" — there is no body to read.
+  const d = status ? await res.json().catch(() => ({})) : {};
+  // The host advancing closes the poll and the server answers 409; a deleted
+  // poll answers 404. Both are final: api() retries 5xx only, so "try again"
+  // here would be an instruction the participant could follow forever without
+  // it ever working. Say what happened and offer no retry.
+  if (status === 409 || status === 404 || d.error === 'poll_not_active') {
+    return notice('Question closed',
+      'The host has moved on from this question, so ' + what + ' could not be sent.' +
+      (kept ? ' Nothing you typed has been lost — it is still saved on this device, and it comes back if the host reopens the question.' : ''),
+      extraHtml);
+  }
+  if (status === 503) {
+    const s = d.retryAfterSeconds || Number(res.headers.get('Retry-After')) || 0;
+    return notice('Everyone answered at once',
+      'The server is catching up and did not take ' + what + '. Press Send again in ' +
+      (s > 0 ? 'about ' + s + 's' : 'a moment') + '.');
+  }
+  if (!status) {
+    return notice('No connection',
+      'We could not reach the server, so ' + what + ' has not been sent. Check your signal, then send again.');
+  }
+  return notice('Not sent', 'Something went wrong sending ' + what + '. Try again.');
 }
 
 function showTab(which) {
@@ -181,9 +267,12 @@ function buildInput(poll) {
       '<div id="voteInputs" class="row tight">' + btns + '</div>';
   }
   if (poll.type === 'word_cloud') {
+    // Restored INLINE for the same reason the worksheet is: a reload, or a host
+    // who reopens this question, must not blank what they had typed.
     return q +
       '<div id="voteState"></div>' +
-      '<div id="voteInputs"><input id="wordInput" type="text" placeholder="Type a word or short phrase" maxlength="60" />' +
+      '<div id="voteInputs"><input id="wordInput" type="text" placeholder="Type a word or short phrase" maxlength="60"' +
+      ' oninput="boxKeep(\'' + poll.id + '\',this)" value="' + esc(boxDraft(poll.id)) + '" />' +
       '<div style="height:10px"></div><button class="btn go full" onclick="submitWord(\'' + poll.id +
       '\')">Send</button><p class="small muted center" style="margin-top:8px">You can submit more than once.</p></div>';
   }
@@ -232,7 +321,8 @@ function buildInput(poll) {
   // open_text
   return q +
     '<div id="voteState"></div>' +
-    '<div id="voteInputs"><textarea id="textInput" placeholder="Type your response…" maxlength="280"></textarea>' +
+    '<div id="voteInputs"><textarea id="textInput" placeholder="Type your response…" maxlength="280"' +
+    ' oninput="boxKeep(\'' + poll.id + '\',this)">' + esc(boxDraft(poll.id)) + '</textarea>' +
     '<div style="height:10px"></div><button class="btn go full" onclick="submitText(\'' + poll.id +
     '\')">Send</button></div>';
 }
@@ -240,7 +330,10 @@ function buildInput(poll) {
 function refreshVoteState(poll) {
   const stateEl = document.getElementById('voteState');
   const inputs = document.getElementById('voteInputs');
-  if (!stateEl) return;
+  // No poll: the submit's own callers reach here after the host closed the last
+  // question, and reading .type off nothing would throw away the confirmation
+  // toast for a submission the server had already accepted.
+  if (!stateEl || !poll) return;
   // Multiple choice, rating and worksheet are single-submit per device.
   const singleSubmit = poll.type === 'multiple_choice' || poll.type === 'rating' || poll.type === 'worksheet';
   if (singleSubmit && isDone('poll_' + poll.id)) {
@@ -258,6 +351,19 @@ function refreshVoteState(poll) {
   }
 }
 
+// ---- single-box drafts ----------------------------------------------------
+// A word or an open-text answer is one box, but it is lost exactly the way a
+// worksheet is: the participant frame carries only the ACTIVE poll, so the
+// moment the host advances, renderVote rebuilds #voteContent and whatever was
+// half-typed is gone — before they ever pressed Send. Same shelf as the
+// worksheet's, one string instead of nine.
+function boxKey(pollId) { return 'lp_box_' + CODE + '_' + pollId; }
+function boxDraft(pollId) {
+  try { return localStorage.getItem(boxKey(pollId)) || ''; }
+  catch (e) { return ''; }   // private mode — start clean rather than blow up render
+}
+function boxKeep(pollId, el) { queueDraft(boxKey(pollId), el.value); }
+
 // ---- actions --------------------------------------------------------------
 // isDone is only set once the POST lands, and a retry can keep that quiet for
 // over a second — long enough for an impatient second tap, which mints a second
@@ -269,7 +375,10 @@ async function vote(pollId, optionId, el) {
   if (el) el.classList.add('chosen');
   try {
     const r = await api('/poll/' + pollId + '/vote', { optionId });
-    if (r.ok) { markDone('poll_' + pollId); refreshVoteState(currentPoll()); toast('Vote counted'); }
+    if (r.ok) { noticeClear(); markDone('poll_' + pollId); refreshVoteState(currentPoll()); toast('Vote counted'); }
+    // The optimistic highlight has to come back off: a vote that never landed
+    // otherwise sits on screen looking exactly like one that did.
+    else { if (el) el.classList.remove('chosen'); await sendFailed(r, 'your vote', false); }
   } finally { delete inFlight[pollId]; }
 }
 async function rate(pollId, value, el) {
@@ -278,22 +387,27 @@ async function rate(pollId, value, el) {
   if (el) el.classList.add('chosen');
   try {
     const r = await api('/poll/' + pollId + '/rate', { value });
-    if (r.ok) { markDone('poll_' + pollId); refreshVoteState(currentPoll()); toast('Rating sent'); }
+    if (r.ok) { noticeClear(); markDone('poll_' + pollId); refreshVoteState(currentPoll()); toast('Rating sent'); }
+    else { if (el) el.classList.remove('chosen'); await sendFailed(r, 'your rating', false); }
   } finally { delete inFlight[pollId]; }
 }
 async function submitWord(pollId) {
   const el = document.getElementById('wordInput');
   const text = el.value.trim();
   if (!text) return;
+  wsFlushDraft();   // the debounce has up to 400ms left to run, and the failure message promises it is already saved
   const r = await api('/poll/' + pollId + '/word', { text });
-  if (r.ok) { el.value = ''; toast('Added'); }
+  if (r.ok) { el.value = ''; clearDraft(boxKey(pollId)); noticeClear(); toast('Added'); }
+  else await sendFailed(r, 'your word', true);   // left in the box AND on the shelf
 }
 async function submitText(pollId) {
   const el = document.getElementById('textInput');
   const text = el.value.trim();
   if (!text) return;
+  wsFlushDraft();
   const r = await api('/poll/' + pollId + '/text', { text, author: NAME });
-  if (r.ok) { el.value = ''; markDone('poll_' + pollId); toast('Response sent'); }
+  if (r.ok) { el.value = ''; clearDraft(boxKey(pollId)); noticeClear(); markDone('poll_' + pollId); toast('Response sent'); }
+  else await sendFailed(r, 'your response', true);
 }
 async function askQuestion() {
   const el = document.getElementById('qInput');
@@ -356,29 +470,38 @@ let wsPending = null;   // { key, data } — snapshotted at keystroke, written o
 // The snapshot is taken NOW and the write deferred, not the other way round: the
 // host can swap the active poll inside the debounce window, and a flush that read
 // the DOM at fire time would save the new poll's boxes under the old poll's key.
+// One pending write is enough — only ever one poll's inputs are on screen.
+function queueDraft(key, data) {
+  wsPending = { key, data };
+  clearTimeout(wsTimer);
+  wsTimer = setTimeout(wsFlushDraft, 400);   // per-keystroke writes would thrash localStorage on a phone
+}
 function wsQueueDraft(pollId) {
   const out = {};
   for (const t of wsCells()) if (t.value.trim()) out[t.dataset.cell] = t.value;
-  wsPending = { key: wsKey(pollId), data: JSON.stringify(out) };
-  clearTimeout(wsTimer);
-  wsTimer = setTimeout(wsFlushDraft, 400);   // per-keystroke writes would thrash localStorage on a phone
+  queueDraft(wsKey(pollId), JSON.stringify(out));
 }
 
 function wsFlushDraft() {
   clearTimeout(wsTimer);
   wsTimer = null;
   if (!wsPending) return;
-  try { localStorage.setItem(wsPending.key, wsPending.data); } catch (e) {}
+  // An emptied box leaves no key behind: '' is the single-box types' "nothing
+  // typed", where the worksheet's empty draft is '{}' and stays a real write.
+  try {
+    if (wsPending.data) localStorage.setItem(wsPending.key, wsPending.data);
+    else localStorage.removeItem(wsPending.key);
+  } catch (e) {}
   wsPending = null;
 }
 
-function wsClearDraft(pollId) {
-  const k = wsKey(pollId);
-  // Drop a queued write for this poll too, or it would resurrect the draft we
+function clearDraft(key) {
+  // Drop a queued write for this key too, or it would resurrect the draft we
   // just cleared 400ms after a successful submit.
-  if (wsPending && wsPending.key === k) { clearTimeout(wsTimer); wsTimer = null; wsPending = null; }
-  try { localStorage.removeItem(k); } catch (e) {}
+  if (wsPending && wsPending.key === key) { clearTimeout(wsTimer); wsTimer = null; wsPending = null; }
+  try { localStorage.removeItem(key); } catch (e) {}
 }
+function wsClearDraft(pollId) { clearDraft(wsKey(pollId)); }
 
 // iOS can freeze or discard a backgrounded tab before the debounce fires — and
 // that is exactly the participant who has typed the most.
@@ -394,6 +517,7 @@ async function submitWorksheet(pollId) {
     if (v) { cells[t.dataset.cell] = v; filled++; }
   }
   if (!filled) { toast('Fill at least one box'); return; }
+  wsFlushDraft();   // the shelf must already match the screen before the send that might fail
   inFlight[pollId] = 1;
   const btn = document.getElementById('wsSend');
   if (btn) btn.disabled = true;
@@ -410,14 +534,19 @@ async function submitWorksheet(pollId) {
       : { cells, author: NAME, source: 'typed' });
     if (r.ok) {
       wsClearDraft(pollId);
+      noticeClear();
       markDone('poll_' + pollId, filled);
       refreshVoteState(currentPoll());
       toast('Worksheet sent');
     } else {
-      // The draft stays put — they can fix the wifi and hit Send again.
+      // The draft stays put, and the boxes go back to editable — whatever the
+      // failure was, nothing they typed is thrown away here. On a 409 the host
+      // has usually already swapped the question and these cells belong to the
+      // NEXT poll's grid; unlocking them is harmless, and sendFailed is the part
+      // that tells them where their answers actually went.
       if (btn) btn.disabled = false;
       for (const t of wsCells()) t.readOnly = false;
-      toast('Could not send — try again');
+      await sendFailed(r, 'your worksheet', true, wsTypedRecap());
     }
   } finally { delete inFlight[pollId]; }
 }
@@ -436,6 +565,9 @@ async function submitWorksheet(pollId) {
 const WS_MAX_EDGE = 1568;    // the vision model's long edge — pixels past it are bytes it throws away anyway
 const WS_B64_MAX = 900000;   // the server takes 6e6 of base64; this keeps the upload survivable on venue wifi
 const WS_STATUS_MS = 3000;
+// Null-prototype: `data.error` is whatever the server said, and a plain object
+// would answer to 'constructor'.
+const WS_NO_RETRY = Object.assign(Object.create(null), { ai_not_configured: 1, ai_key_rejected: 1 });
 
 let wsOcrBusy = false;
 let wsOcrRaw = null;         // the model's pre-edit transcription, sent with the corrected cells
@@ -506,8 +638,10 @@ async function wsPhotoPicked(input) {
     // submitWorksheet snapshotted the cells before it started retrying. Filling
     // boxes now would show text that is not in what the host is about to receive.
     if (inFlight[pollId]) return wsPhotoNote(pollId, 'Your worksheet was already on its way to the host, so nothing from the photo was added.', false);
-    // ai_not_configured is the one failure a retry cannot fix, so it gets no button.
-    if (!res.ok) return wsPhotoNote(pollId, wsHttpMessage(res.status, data), data.error !== 'ai_not_configured');
+    // No AI at all, and a key the API refuses, are the failures no photo can get
+    // past — those get no retry button. A truncated or refused read is about
+    // THIS photo, so another one is still worth offering.
+    if (!res.ok) return wsPhotoNote(pollId, wsHttpMessage(res.status, data), !WS_NO_RETRY[data.error]);
     if (data.match === false) return wsPhotoNote(pollId, data.message || 'Nothing could be read from that photo. Try another one, or type your answers in.', true);
     wsApplyOcr(poll, data);
   } finally {
@@ -533,6 +667,13 @@ function wsPhotoNote(pollId, text, retry) {
 function wsHttpMessage(status, d) {
   if (status === 413 || d.error === 'payload_too_large') return 'That photo was too large to send. Try again in better light, or type your answers in.';
   if (d.error === 'ai_not_configured') return 'Reading photos is not switched on for this session — please type your answers in.';
+  // A rejected key is not this photo's fault and no photo will get past it. The
+  // server's own message names the environment variable, which is for the
+  // facilitator's logs, not a phone — so this says what the participant can do
+  // and who has to fix it.
+  if (d.error === 'ai_key_rejected') return 'Photo reading is misconfigured for this session — the AI key was rejected. Let the host know, and type your answers in.';
+  if (d.error === 'ai_truncated') return 'There was too much on that photo to read in one go. Try a photo of one row at a time, or type your answers in.';
+  if (d.error === 'ai_refused') return 'The reader would not transcribe that photo. Try another one, or type your answers in.';
   if (status === 503) {
     const s = d.retryAfterSeconds;
     return 'Photos are queued right now — try again in ' + (s > 0 ? 'about ' + s + 's' : 'a moment') + ', or type your answers in.';

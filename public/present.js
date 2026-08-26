@@ -25,6 +25,7 @@ function connect() {
 connect();
 
 function showEnded() {
+  ocrWatch(false);   // the body is about to be replaced, and #stage with it
   document.body.innerHTML =
     '<div class="wrap" style="max-width:620px"><div class="card center" style="margin-top:80px">' +
     '<p class="eyebrow">Session ended</p><h2 style="border:0">This session has been closed.</h2>' +
@@ -104,6 +105,26 @@ async function aiBusyMessage(res) {
   }
   return null;
 }
+// The three failures the server names because pressing the button again cannot
+// fix any of them: a rejected key is a config fix, a cut-off answer is a
+// max_tokens fix, a refusal is a prompt fix. The server sends the remedy with
+// the code; these are only the headings. Null-prototype so an unexpected code
+// cannot resolve to something off Object.prototype.
+const AI_FATAL_LABEL = Object.assign(Object.create(null), {
+  ai_key_rejected: 'AI key rejected',
+  ai_truncated: 'Answer cut off',
+  ai_refused: 'Request declined',
+});
+// null for anything unclassified — a dropped socket really is worth another go.
+async function aiFail(res) {
+  const d = await res.json().catch(() => null);
+  const label = d && AI_FATAL_LABEL[d.error];
+  return label ? { label, message: d.message || '' } : null;
+}
+function aiFailCard(f) {
+  return '<div class="card tint"><p class="eyebrow">' + esc(f.label) + '</p>' +
+    '<p class="muted" style="margin:0">' + esc(f.message) + '</p></div>';
+}
 async function aiCall(title, path, body) {
   aiShow(title, '<p class="empty">Thinking…</p>');
   let res;
@@ -115,7 +136,11 @@ async function aiCall(title, path, body) {
     aiShow(title, busy ? '<p class="empty">' + esc(busy) + '</p>' : aiNotConfigured());
     return null;
   }
-  if (!res.ok) { aiShow(title, '<p class="empty">AI request failed — try again.</p>'); return null; }
+  if (!res.ok) {
+    const f = await aiFail(res);
+    aiShow(title, f ? aiFailCard(f) : '<p class="empty">AI request failed — try again.</p>');
+    return null;
+  }
   return res.json().catch(() => null);
 }
 
@@ -250,7 +275,9 @@ async function aiDraft() {
   } catch { toast('Network error'); btn.textContent = label; btn.disabled = false; return; }
   btn.textContent = label; btn.disabled = false;
   if (res.status === 503) { toast((await aiBusyMessage(res)) || 'AI not configured'); return; }
-  if (!res.ok) { toast('Draft failed'); return; }
+  // Same three verdicts as aiCall's. "Draft failed" for a rejected key sends a
+  // facilitator retyping the topic instead of fixing the server.
+  if (!res.ok) { const f = await aiFail(res); toast(f ? f.label : 'Draft failed'); return; }
   const d = await res.json().catch(() => null);
   if (!d) return;
   document.getElementById('pQuestion').value = d.question || '';
@@ -573,9 +600,11 @@ function renderStage() {
   const empty = document.getElementById('stageEmpty');
   const content = document.getElementById('stageContent');
   const poll = state.polls.find((p) => p.id === state.activePollId);
-  if (!poll) { empty.classList.remove('hidden'); content.classList.add('hidden'); return; }
+  if (!poll) { empty.classList.remove('hidden'); content.classList.add('hidden'); ocrWatch(false); return; }
   empty.classList.add('hidden');
   content.classList.remove('hidden');
+  // Only a worksheet can put anything in the OCR lane.
+  ocrWatch(poll.type === 'worksheet');
 
   const canSynth = poll.type === 'open_text' || poll.type === 'word_cloud';
   const isWs = poll.type === 'worksheet';
@@ -717,6 +746,60 @@ function renderWorksheetLive(poll) {
     : '<p class="small muted" style="margin:16px 0 0">Every box filled by all ' + n + '.</p>';
   return head + '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;min-width:520px">' +
     '<thead>' + thead + '</thead><tbody>' + tbody + '</tbody></table></div>' + note;
+}
+
+// ---- photo queue ----------------------------------------------------------
+// The OCR lane is process-wide and, until this line, invisible from the stage:
+// the only way to see it was /healthz?stats=1 in another browser tab. Standing
+// in front of a room, the facilitator has to be able to tell "nobody has
+// submitted yet" from "twelve photos are still being read" before deciding to
+// move on. Appended to #stage, NOT into #stageContent, which renderStage
+// rewrites wholesale on every SSE tick.
+const OCR_POLL_MS = 5000;
+let ocrTimer = null;
+
+function ocrLine() {
+  let el = document.getElementById('ocrQueue');
+  if (!el) {
+    const stage = document.getElementById('stage');
+    if (!stage) return null;   // showEnded() has replaced the page out from under a tick in flight
+    el = document.createElement('p');
+    el.id = 'ocrQueue';
+    el.className = 'small muted';
+    el.style.margin = '14px 0 0';
+    stage.appendChild(el);
+  }
+  return el;
+}
+
+function ocrWatch(on) {
+  if (!on) {
+    clearInterval(ocrTimer);
+    ocrTimer = null;
+    const el = document.getElementById('ocrQueue');
+    if (el) el.textContent = '';
+    return;
+  }
+  if (ocrTimer) return;   // already watching — renderStage runs on every tick
+  ocrTimer = setInterval(ocrTick, OCR_POLL_MS);
+  ocrTick();
+}
+
+// Silent on an empty lane: a line reading "0 photos" is a line the facilitator
+// learns to stop looking at. A server without the endpoint stops the poll for
+// good; a dropped request just waits for the next tick.
+async function ocrTick() {
+  let d;
+  try {
+    const r = await fetch('/api/ocr-status');
+    if (!r.ok) return ocrWatch(false);
+    d = await r.json();
+  } catch (e) { return; }
+  if (!ocrTimer || !d) return;   // the host stepped off the worksheet while this was in flight
+  const n = (d.running || 0) + (d.waiting || 0);
+  const eta = d.etaSeconds > 0 ? ' · about ' + d.etaSeconds + 's' : '';
+  const el = ocrLine();
+  if (el) el.textContent = n ? n + (n === 1 ? ' photo' : ' photos') + ' being read' + eta : '';
 }
 
 // The bodies ride no broadcast frame — 100 grids of 9 cells would be ~135 KB per

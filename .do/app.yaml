@@ -2,33 +2,150 @@
 # Deploy: connect this GitHub repo in the App Platform UI (it auto-detects
 # this file), or run:  doctl apps create --spec .do/app.yaml
 #
-# IMPORTANT: instance_count MUST stay 1. Live results are broadcast over SSE
-# from a single in-memory process; running >1 instance would split audiences
-# across processes and break the realtime fan-out. To scale beyond one
-# instance you'd add a shared pub/sub (e.g. Redis) + shared store first.
+# ===========================================================================
+# READ FIRST: THIS SPEC DEPLOYS `main`, AND THE APP IT DESCRIBES IS NOT ON IT
+# ===========================================================================
+# Everything this file is sized for — the worksheet poll type, the photo/OCR
+# path, the 100-participant scale work — lives on the `scale-and-worksheet`
+# branch. `branch: main` below is deliberately left alone (which branch to ship
+# is not this file's call), but deploying today would build a `main` that has
+# none of it: no worksheet, no OCR lane, and none of the memory pressure the
+# sizing below exists for.
+#
+# And `deploy_on_push: true` means MERGING TO main IS A DEPLOY. There is no
+# separate "go live" step to schedule. Merge first, deliberately, and never
+# during an event — see OPERATIONAL RISKS in README.md.
+#
+# ---------------------------------------------------------------------------
+# SIZING: why this app is on 1 GB and not 0.5 GB
+# ---------------------------------------------------------------------------
+# Not the SSE fan-out. 100 participants + 1 presenter = 101 idle SSE sockets,
+# which cost roughly 40 KB each — about 4 MB total. Broadcasts are coalesced
+# per room on a 120 ms timer and capped by a 1 MB writableLength backpressure
+# check, so a full room's live results measured 0.10 MB of socket writes and
+# about +2 MB RSS. A 0.5 GB box carries the realtime path with room to spare.
+#
+# It is the worksheet photo path. A worksheet drop fans one Claude vision call
+# out per participant, so the OCR lane is sized to hold 10 running + 120 queued
+# jobs (server.js: AI_CONCURRENCY_OCR / AI_QUEUE_MAX). Each of those 130 jobs
+# pins one decoded image Buffer, capped by OCR_B64_MAX (1.2e6 base64 chars,
+# ~880 KB decoded).
+#
+# The numbers below are MEASURED, not derived: local runs (macOS, Node v24.16)
+# filling the lane to its ceiling with incompressible payloads at OCR_B64_MAX,
+# then piling concurrent uploads on top, reading RSS off /healthz?stats=1.
+#
+#   idle baseline, Node/V8 + one room          ~=  45-50 MB
+#   130 resident OCR jobs @ ~1.5 MB each       ~= 195 MB
+#                                                 --------
+#   lane at its ceiling                        ~= 245 MB   measured
+#   + 45 concurrent uploads still streaming    ~=  85 MB   measured
+#                                                 --------
+#   measured peak                              ~= 330 MB
+#
+# That burst did not saturate BODY_BUDGET (96 MB), so the analytic ceiling is a
+# little above what was measured — ~340 MB, not a different order of magnitude.
+#
+# ~1.5 MB per job, not the Buffer's ~880 KB: the rest is base64/JSON decode
+# garbage and heap the allocator has not handed back while the job waits.
+#
+# The two big terms overlap, which is why they add rather than alternate: a body
+# is charged against BODY_BUDGET while it streams and released at 'end', but the
+# Buffer it decodes to is then held for the whole queue wait, which under load is
+# far longer than the upload. 330 MB of transient allocation against a 512 MB
+# container leaves no GC headroom, and the failure mode is not a JS exception —
+# it is a silent cgroup OOM kill (see run_command below). 1 GB buys the margin;
+# photos are never persisted, so this is peak transient memory, not growth.
 name: exco-live
 region: nyc
 services:
   - name: web
     # --- source: point this at the repo you push to ---
+    # branch + deploy_on_push: see READ FIRST at the top of this file. A merge
+    # to this branch ships immediately, with no confirmation step.
     github:
       repo: The-ExCo-Group/exco-live
       branch: main
       deploy_on_push: true
     source_dir: /
     # --- runtime ---
-    run_command: node server.js
+    # --max-old-space-size bounds the V8 JS HEAP ONLY. It is not a total-RSS cap
+    # and it does not cap Buffers: Node Buffers are external memory and are not
+    # counted against it at all, so the ~195 MB of queued images above sits
+    # entirely outside this number. What it buys is a failure mode: left at the
+    # default, V8 sizes its heap from the host, grows past what the container
+    # allows, and DigitalOcean hard-kills the process on cgroup OOM with no JS
+    # error, no stack and no log line — the app just restarts mid-session. With
+    # an explicit ceiling V8 GCs hard and, at worst, throws a catchable JS heap
+    # OOM that reaches the logs.
+    #
+    # That only works if the ceiling leaves room for everything the flag does NOT
+    # count. It does not set the limit it names: V8 adds ~3 semi-spaces on top.
+    # Measured on Node v24.16 — check yours, the add-on is V8-version dependent:
+    #
+    #   node --max-old-space-size=N -e "console.log(require('v8').getHeapStatistics().heap_size_limit)"
+    #     N=320 -> 512 MB      N=512 -> 704 MB      N=768 -> 960 MB
+    #
+    # So 768 would mean a 960 MB heap ceiling inside a 1024 MB container — ~64 MB
+    # left for ~300 MB of external Buffers and native memory. The cgroup kill
+    # always wins that race and the flag never fires. 320 gives a 512 MB ceiling:
+    # >10x the worst measured JS heap (peak heapUsed at the lane ceiling was
+    # 19-48 MB), while leaving 512 MB of the container for external memory
+    # against a ~300 MB worst measured non-heap footprint. The worst case above
+    # was re-run under 320 and stayed clean: peak RSS 328 MB, peak heap 19 MB.
+    #
+    # No --env-file here: App Platform injects the env vars below (and the
+    # dashboard secrets) into the process directly. The repo's .env is a local
+    # development convenience only and is not deployed.
+    run_command: node --max-old-space-size=320 server.js
     environment_slug: node-js
-    instance_count: 1               # keep at 1 (see note above)
-    instance_size_slug: apps-s-1vcpu-0.5gb
+    instance_count: 1               # keep at 1 (see note below)
+    # Verified against DigitalOcean's App Platform pricing docs and the app-spec
+    # reference: 1 shared vCPU / 1 GiB RAM. (apps-s-1vcpu-1gb-fixed is the same
+    # resources but cannot be manually scaled — use this one.)
+    instance_size_slug: apps-s-1vcpu-1gb
     http_port: 8080                 # App Platform sets PORT=8080; server reads process.env.PORT
+    # -----------------------------------------------------------------------
+    # instance_count MUST stay 1. Every piece of coordination in this server is
+    # per-process, in-memory, and has no cross-instance equivalent:
+    #   * SSE fan-out — live results are broadcast from one in-memory process;
+    #     a second instance would split the audience and each half would see
+    #     only its own updates.
+    #   * Coalesced broadcast timers — the 120 ms per-room throttle is a local
+    #     timer, so N instances means N uncoordinated flushes per room.
+    #   * Persistence in-flight guard — the "one Supabase write per room at a
+    #     time" latch is a local flag; two instances would interleave writes to
+    #     the same row and last-write-wins would silently drop responses.
+    #   * Row fingerprint cache — changed-row-only upserts diff against a local
+    #     fingerprint map, so a second instance has a cold cache and would
+    #     rewrite rows it believes changed.
+    #   * Idempotency sid sets — duplicate submissions are suppressed per poll
+    #     via a local Set of client sids. Split across instances, the same
+    #     phone retrying lands on the other instance and double-counts.
+    # So dedupe and idempotency BREAK above one instance — this is a
+    # correctness constraint, not a cost decision. Scaling out needs shared
+    # pub/sub (e.g. Redis) for the fan-out plus a shared store for the guards,
+    # fingerprints and sid sets before instance_count can move.
+    # -----------------------------------------------------------------------
     envs:
       - key: NODE_ENV
         value: production
       # --- Supabase (durable store) ---
       # The server persists rooms/polls/votes/Q&A here so state survives
-      # redeploys and past events stay queryable. SUPABASE_KEY is the
-      # publishable key (safe to store; the server is the only DB client).
+      # redeploys and past events stay queryable.
+      #
+      # SUPABASE_KEY is the PUBLISHABLE key, which is the key designed to be
+      # handed out — but "publishable" is not the same as "harmless". It is only
+      # safe to commit if row-level security is enabled on rooms/polls/questions/
+      # agendas, because RLS is the only thing standing between this key and a
+      # direct PostgREST read of every past session. Nothing in this repo checks
+      # or asserts that RLS is on. Confirm it in the Supabase dashboard
+      # (Table Editor > each table > RLS) before treating this line as safe.
+      #
+      # These two ARE the deployed project's real values, deliberately: they are
+      # deploy configuration, not the secret. .env.example carries placeholders
+      # only — see README.md.
+      #
       # NOTE: editing this file does NOT push env vars to a running App
       # Platform app — also set these in the DO dashboard (App > Settings >
       # web > Environment Variables) or run `doctl apps update --spec`.
@@ -37,11 +154,37 @@ services:
       - key: SUPABASE_KEY
         value: sb_publishable_ThtnFIrDyLBRWEtKFSbn7g_OSVsQVOz
       # --- AI features (Claude) ---
-      # ANTHROPIC_API_KEY is a SECRET — do NOT hard-code it here. Add it in the
-      # DO dashboard (App > Settings > web > Environment Variables, type SECRET).
-      # Without it, AI features report "not configured"; the rest of the app is
-      # unaffected. ANTHROPIC_MODEL is optional (server default: claude-haiku-4-5).
+      # ANTHROPIC_API_KEY IS A SECRET AND IS DELIBERATELY NOT IN THIS FILE.
+      # This spec is committed to git; anything with a `value:` here is public
+      # to everyone with repo access. Set the key in the DO dashboard only
+      # (App > Settings > web > Environment Variables, type SECRET) — never add
+      # it below.
+      #
+      # UNSET and WRONG are different failures. Unset: the AI endpoints return
+      # ai_not_configured (503), the buttons say "not configured", and nothing
+      # else changes. Set but wrong (a typo, a revoked key, the literal
+      # `sk-ant-...` placeholder): AI advertises itself as available and EVERY
+      # call fails with ai_key_rejected (502) — mid-event, on stage. The server
+      # prints a loud boot warning when the key does not look real, but only the
+      # API can settle it. Rehearse one AI call against the deployed app after
+      # setting the key.
+      #
+      # Three models, split by job. All three are optional — these values match
+      # the server.js defaults and are pinned here so a deploy is explicit
+      # about what it is paying for.
+      #   ANTHROPIC_MODEL          live in-session features — latency matters
+      #   ANTHROPIC_MODEL_OCR      worksheet photo -> text vision transcription
+      #   ANTHROPIC_MODEL_ANALYSIS post-session analysis — quality matters
       - key: ANTHROPIC_MODEL
         value: claude-haiku-4-5
+      - key: ANTHROPIC_MODEL_OCR
+        value: claude-sonnet-5
+      - key: ANTHROPIC_MODEL_ANALYSIS
+        value: claude-sonnet-5
+      # Deliberately NOT set here: AI_CONCURRENCY_OCR and AI_QUEUE_MAX. The
+      # server.js defaults are already 10 and 120 — the exact values the memory
+      # math above is built on — so restating them here would be duplication
+      # that silently drifts the day someone tunes the code. Override in the
+      # dashboard if a specific event ever needs it.
     health_check:
       http_path: /healthz

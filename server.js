@@ -42,6 +42,12 @@ const ANTHROPIC_MODEL_OCR = process.env.ANTHROPIC_MODEL_OCR || 'claude-sonnet-5'
 const ANTHROPIC_MODEL_ANALYSIS = process.env.ANTHROPIC_MODEL_ANALYSIS || 'claude-sonnet-5';
 const ANTHROPIC_BASE = (process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com').replace(/\/$/, '');
 const AI_ENABLED = !!ANTHROPIC_KEY;
+// Presence is all AI_ENABLED can honestly check, and a placeholder key passes it:
+// every AI button then advertises itself and fails mid-event. This catches the
+// obvious impostors (.env.example ships the literal `sk-ant-...`) for a loud boot
+// warning ONLY — it never gates AI_ENABLED, because a heuristic that vetoes a key
+// the API would have accepted is worse than the failure it prevents.
+const AI_KEY_LOOKS_REAL = /^sk-ant-/.test(ANTHROPIC_KEY) && ANTHROPIC_KEY.length >= 40;
 
 // Env knob reader. A knob set to garbage falls back to the default rather than
 // poisoning a counter with NaN, and `min` lets 0 be a legal setting for retries
@@ -61,8 +67,12 @@ const AI_CONCURRENCY_OCR = envInt('AI_CONCURRENCY_OCR', 10, 1);
 const AI_CONCURRENCY_INTERACTIVE = envInt('AI_CONCURRENCY_INTERACTIVE', 2, 1);
 // Queue everyone, reject nobody: a participant told "too busy" is holding the
 // one paper copy of a sheet the session has already moved on from. 120 waiting
-// jobs hold one image Buffer each, capped by OCR_B64_MAX at ~900 KB — ~108 MB
-// worst case, which the 0.5 GB instance in .do/app.yaml carries.
+// plus the 10 running hold one image Buffer each, capped by OCR_B64_MAX at
+// ~900 KB (12e5 base64 chars decode to 9e5 bytes) — 130 x 900 KB ~= 117 MB worst
+// case in image bytes. Measured RSS at that ceiling is ~245 MB — the gap is V8
+// and socket overhead, and is why .do/app.yaml sizes the box on the measurement
+// rather than on this arithmetic.
+// case, which the 1 GB instance in .do/app.yaml carries.
 const AI_QUEUE_MAX = envInt('AI_QUEUE_MAX', 120, 1);
 // Per attempt, not per call. Bounded low on purpose: with retries on top, a
 // generous timeout multiplies into minutes of spinner for a socket that is dead.
@@ -127,7 +137,13 @@ function sb(method, pathAndQuery, opts = {}) {
         if (res.statusCode >= 200 && res.statusCode < 300) {
           try { resolve(data ? JSON.parse(data) : null); } catch { resolve(null); }
         } else {
-          reject(new Error(`supabase ${method} ${pathAndQuery} -> ${res.statusCode}: ${data.slice(0, 300)}`));
+          // The query and the PostgREST body are diagnostic gold and client
+          // poison: analyticsList()/fetchRoomDetail() have no local catch, so
+          // this message is one hop from sendApiError and a participant's phone.
+          // Message says what failed; .detail says why, and only logs read it.
+          const e = new Error(`supabase ${method} ${pathAndQuery.split('?')[0]} -> ${res.statusCode}`);
+          e.detail = `${pathAndQuery} :: ${data.slice(0, 300)}`;
+          reject(e);
         }
       });
     });
@@ -274,6 +290,22 @@ async function persistRoom(code) {
   for (const [key, f] of fresh) seen.set(key, f);
 }
 
+// A failed write is otherwise invisible: every save() is fire-and-forget, and
+// `dirty` empties whether the batch landed or 400'd — so a session that persisted
+// nothing looks identical to one that persisted everything. Counted here so
+// /healthz?stats can show it and /end can refuse to claim a clean finish.
+let persistErrors = 0;
+let lastPersistError = '';
+let lastPersistErrorAt = 0;
+
+function persistFailed(what, e) {
+  persistErrors++;
+  lastPersistError = `${what}: ${e.message}`;
+  lastPersistErrorAt = Date.now();
+  // The only place the upstream body is allowed out — see sb().
+  console.error('PERSIST FAILED —', lastPersistError, e.detail || '');
+}
+
 // Per-room write-through. Fire-and-forget from request handlers.
 const dirty = new Set();
 const saveTimers = new Map();   // code -> pending flush timer
@@ -311,24 +343,34 @@ function cancelSave(code) {
   resave.delete(code);
 }
 
+// Resolves true when everything pending for this room reached Supabase, false
+// when a write failed. /end is the caller that matters: it archives the room out
+// of memory on the strength of this answer, so it has to be an answer.
 async function flushRoom(code) {
   const t = saveTimers.get(code);
   if (t) clearTimeout(t);
   saveTimers.delete(code);
   saveFirst.delete(code);
   // Wait an in-flight persist out rather than skip it: /end flushes before it
-  // archives and must not lose the batch that is still being written.
-  while (saving.has(code)) await saving.get(code);
-  if (!dirty.has(code)) return;
+  // archives and must not lose the batch that is still being written. Its
+  // outcome is this call's outcome too — it carries this room's writes.
+  let ok = true;
+  while (saving.has(code)) ok = (await saving.get(code)) !== false && ok;
+  if (!dirty.has(code)) return ok;
   dirty.delete(code);
+  // Deliberately NOT re-added on failure. A genuinely broken schema 400s every
+  // attempt, and a re-arming retry loop against one is an unattended write storm.
+  // Row fingerprints are only committed once a write lands, so the next save()
+  // re-sends this batch anyway — recovery without the storm, and persistErrors
+  // is what makes the gap visible in the meantime.
   const p = persistRoom(code)
-    .catch((e) => console.error('persist room', code, 'failed:', e.message))
+    .then(() => true, (e) => { persistFailed(`persist room ${code}`, e); return false; })
     .finally(() => {
       saving.delete(code);
       if (resave.delete(code)) save(code);
     });
   saving.set(code, p);
-  await p;
+  return p;
 }
 
 // For shutdown: land everything still pending before the process goes.
@@ -348,12 +390,12 @@ async function saveAgenda(key) {
       prefer: 'resolution=merge-duplicates,return=minimal',
       body: [{ key, name: a.name, polls: a.polls, saved_at: iso(a.savedAt) }],
     });
-  } catch (e) { console.error('persist agenda', key, 'failed:', e.message); }
+  } catch (e) { persistFailed(`persist agenda ${key}`, e); }
 }
 async function deleteAgenda(key) {
   if (!SB_ENABLED) return;
   try { await sb('DELETE', `/agendas?key=eq.${encodeURIComponent(key)}`); }
-  catch (e) { console.error('delete agenda', key, 'failed:', e.message); }
+  catch (e) { persistFailed(`delete agenda ${key}`, e); }
 }
 
 // Load all state from Supabase into memory on boot.
@@ -435,7 +477,7 @@ async function load() {
     }
     console.log(`Loaded ${Object.keys(rooms).length} room(s) and ${Object.keys(agendas).length} agenda(s) from Supabase.`);
   } catch (e) {
-    console.error('Supabase load failed — starting with empty state:', e.message);
+    console.error('Supabase load failed — starting with empty state:', e.message, e.detail || '');
   }
 }
 
@@ -620,6 +662,15 @@ const wireContent = (blocks) => blocks.map((b) => (b && b.source && Buffer.isBuf
   ? Object.assign({}, b, { source: Object.assign({}, b.source, { data: b.source.data.toString('base64') }) })
   : b));
 
+// A stop_reason is the model's final answer about this exact request, not a
+// transport hiccup: another attempt returns the same one and bills for it.
+function aiStopErr(code, message) {
+  const e = new Error(message);
+  e.code = code;
+  e.retryable = false;
+  return e;
+}
+
 // One HTTP round-trip to /v1/messages. No queueing, no retry — claude() owns
 // both. Errors carry .status/.retryable/.retryAfterMs for the retry loop.
 function claudeOnce({ system, user, content, schema, maxTokens = 2048, model }) {
@@ -667,8 +718,16 @@ function claudeOnce({ system, user, content, schema, maxTokens = 2048, model }) 
       res.on('end', () => {
         const data = Buffer.concat(chunks).toString('utf8');
         if (res.statusCode < 200 || res.statusCode >= 300) {
-          const e = new Error(`anthropic ${res.statusCode}: ${data.slice(0, 300)}`);
+          // Status on the message, upstream body on .detail: sendAiError echoes a
+          // message to the client, and an API error body is not for a phone.
+          const e = new Error(`anthropic ${res.statusCode}`);
           e.status = res.statusCode;
+          e.detail = data.slice(0, 300);
+          // The key is wrong, revoked or out of credit — the one AI failure with
+          // a specific remedy, and the one that otherwise reads as "AI request
+          // failed" for a whole event. 401/403 are absent from AI_RETRY_STATUS,
+          // so this is already the no-retry path; nothing here changes that.
+          if (res.statusCode === 401 || res.statusCode === 403) e.code = 'ai_key_rejected';
           e.retryable = AI_RETRY_STATUS.has(res.statusCode);
           const ra = parseRetryAfter(res.headers['retry-after']);
           if (ra != null) e.retryAfterMs = ra;
@@ -676,6 +735,12 @@ function claudeOnce({ system, user, content, schema, maxTokens = 2048, model }) 
         }
         try {
           const json = JSON.parse(data);
+          // Checked before the content is touched. A 200 whose answer was cut off
+          // at max_tokens is broken JSON, which used to surface as "model did not
+          // return valid JSON" and send someone hunting a prompt bug that does not
+          // exist; a refusal reads the same way. Both are final answers.
+          if (json.stop_reason === 'max_tokens') return fail(aiStopErr('ai_truncated', `answer cut off at max_tokens (${body.max_tokens})`));
+          if (json.stop_reason === 'refusal') return fail(aiStopErr('ai_refused', 'the model declined to answer'));
           const text = (json.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
           if (!schema) return ok(text);
           try { ok(JSON.parse(text)); }
@@ -1696,14 +1761,41 @@ function sendApiError(res, e) {
     return send(res, 503, { error: 'busy', reason: e.code || 'busy', retryAfterSeconds: secs }, Object.assign({ 'Retry-After': String(secs) }, conn));
   }
   if (e && e.status === 413) return send(res, 413, { error: 'payload_too_large' }, conn);
-  return send(res, 500, { error: 'server_error', message: e.message }, conn);
+  // An AI failure that reached the router's catch-all rather than a handler's own
+  // (draft-poll answers straight out of handleApi) keeps its specific code. The
+  // two functions only ever hand each other disjoint cases, so no ping-pong.
+  if (e && AI_FATAL[e.code]) return sendAiError(res, e);
+  // The catch-all, and the only branch with no idea what it is holding. Anything
+  // unclassified that reached here can be an upstream failure — sb() builds one
+  // per PostgREST reply, and analyticsList()/fetchRoomDetail() have no local
+  // catch — so an unauthenticated GET could hand a participant's phone the
+  // database's own words. Detail to the logs, a shape to the client.
+  console.error('unhandled api error:', (e && e.stack) || e, (e && e.detail) || '');
+  return send(res, 500, { error: 'server_error', message: 'Something went wrong on the server.' }, conn);
 }
+
+// Distinct because the remedies are distinct — a rejected key is a config fix, a
+// truncated answer is a max_tokens fix, a refusal is a prompt fix — and because
+// none of the three gets better by pressing the button again. Without these they
+// are all "AI request failed", indistinguishable from a dropped socket.
+// Null-prototype: e.code is a Node error code on the socket paths, and a plain
+// object would answer to 'constructor'.
+const AI_FATAL = Object.assign(Object.create(null), {
+  ai_key_rejected: 'The Claude API key was rejected. Check ANTHROPIC_API_KEY on the server — AI features cannot work until it is fixed.',
+  ai_truncated: 'The AI answer was cut off before it finished. Nothing usable came back.',
+  ai_refused: 'The model declined to answer this request.',
+});
 
 // An AI endpoint that catches its own failure still has to tell a shed call
 // apart from an upstream fault, or the queue's 503 + Retry-After is flattened
 // into a 502 the client can only read as "AI request failed".
 function sendAiError(res, e) {
   if (e && (e.status === 503 || BUSY_CODES.has(e.code))) return sendApiError(res, e);
+  // The upstream body never leaves the process, and a truncation or a refusal is
+  // otherwise invisible here — the client is told, but nobody reading the logs is.
+  if (e && (e.detail || AI_FATAL[e.code])) console.error('ai call failed:', e.message, e.detail || '');
+  // retryable:false so a client knows the spinner is not worth a second press.
+  if (e && AI_FATAL[e.code]) return send(res, 502, { error: e.code, message: AI_FATAL[e.code], retryable: false });
   return send(res, 502, { error: 'ai_error', message: e.message });
 }
 
@@ -1782,9 +1874,11 @@ function readBody(req, max = BODY_MAX) {
 // One JSON body carrying one base64 photo. Sized off what the client actually
 // sends (join.js caps its upload at 900000 base64 chars) plus headroom, NOT off
 // what a vision call could swallow: an accepted photo is held for the length of
-// the queue wait, so the ceiling here times AI_QUEUE_MAX is resident memory on a
-// 512 MB instance. BODY_BUDGET caps how many can be in flight at once, but it
-// releases at 'end' — long before the queued job is done with the image.
+// the queue wait, so OCR_B64_MAX decoded (~900 KB) times the 130 jobs the OCR
+// lane can hold is ~117 MB of image bytes (~245 MB measured RSS) on the 1 GB
+// instance. BODY_BUDGET
+// caps how many can be in flight at once, but it releases at 'end' — long before
+// the queued job is done with the image.
 const OCR_BODY_MAX = 16e5;
 const OCR_B64_MAX = 12e5;
 const OCR_MIN_BYTES = 4000;
@@ -1990,6 +2084,11 @@ const server = http.createServer(async (req, res) => {
         rooms: Object.keys(rooms).length,
         dirty: dirty.size,
         saving: saving.size,
+        // `dirty` returning to 0 proves nothing on its own — it empties on a
+        // failed write too. These three are the only signal that it landed.
+        persistErrors,
+        lastPersistError: lastPersistError || null,
+        lastPersistErrorAt: lastPersistErrorAt ? iso(lastPersistErrorAt) : null,
         aiRunning: ocr.running + inter.running,
         aiWaiting: ocr.waiting + inter.waiting,
         bodyInFlight,
@@ -2243,11 +2342,11 @@ async function handleApi(req, res, seg, url) {
   // for analytics), tell joiners it's over, and drop it from the live layer.
   if (seg[0] === 'room' && seg[2] === 'end' && req.method === 'POST') {
     if (!room) return notFound(res);
-    await flushRoom(code);   // land the last batch first — dropping it lost up to 54 submissions
+    let persisted = await flushRoom(code);   // land the last batch first — dropping it lost up to 54 submissions
     cancelSave(code);        // then stop anything further racing the archive
     if (SB_ENABLED) {
       try { await sb('PATCH', `/rooms?code=eq.${code}`, { body: { ended_at: iso() }, prefer: 'return=minimal' }); }
-      catch (e) { console.error('end session persist failed:', e.message); }
+      catch (e) { persisted = false; persistFailed(`end session ${code}`, e); }
     }
     cancelBroadcast(code);
     endStreams(code);
@@ -2257,7 +2356,21 @@ async function handleApi(req, res, seg, url) {
     // flush for a room that no longer exists, which persistRoom reads as
     // "deleted" and would take the archive down with it.
     cancelSave(code);
-    return send(res, 200, { ok: true });
+    // The archive still happens on a failed flush — keeping a room in memory
+    // that no longer accepts responses loses more than an incomplete write does
+    // — but it must not come back as a bare ok. 200 because the session really
+    // did end and re-ending it would only 404; ok:false because its data may be
+    // short. Whoever is on stage needs to know before they close the laptop.
+    if (!persisted) {
+      return send(res, 200, {
+        ok: false,
+        ended: true,
+        persisted: false,
+        error: 'persist_failed',
+        message: 'Session ended, but saving the last responses failed — the stored results may be incomplete. Check the server logs before relying on this session.',
+      });
+    }
+    return send(res, 200, { ok: true, persisted: true });
   }
 
   // POST /api/room/:code/delete — permanently remove a session and its data.
@@ -2273,7 +2386,7 @@ async function handleApi(req, res, seg, url) {
     sentRows.delete(code);
     if (SB_ENABLED) {
       try { await sb('DELETE', `/rooms?code=eq.${code}`); } // cascade clears polls/questions
-      catch (e) { console.error('delete session failed:', e.message); }
+      catch (e) { persistFailed(`delete session ${code}`, e); }
     }
     return send(res, 200, { ok: true });
   }
@@ -2577,5 +2690,22 @@ process.on('unhandledRejection', (e) => console.error('unhandled rejection:', (e
 load().finally(() => {
   server.listen(PORT, () => {
     console.log(`\n  Live Polls running:  http://localhost:${PORT}\n`);
+    // Last line printed, on purpose: the alternative is finding out on stage,
+    // when every AI button is lit and every one of them fails. A warning only —
+    // AI stays enabled, because only the API can settle whether a key is live.
+    if (AI_ENABLED && !AI_KEY_LOOKS_REAL) {
+      console.warn(
+        '  ***************************************************************\n' +
+        '  WARNING: ANTHROPIC_API_KEY does not look like a real API key\n' +
+        `  (${ANTHROPIC_KEY.length} chars, ${ANTHROPIC_KEY.startsWith('sk-ant-') ? 'sk-ant- prefix ok' : 'no sk-ant- prefix'}).\n` +
+        '  .env.example ships the placeholder "sk-ant-..." — if that was copied\n' +
+        '  into .env, AI features will still advertise themselves and EVERY AI\n' +
+        '  call will fail with ai_key_rejected. Set a real key, or unset it so\n' +
+        '  the buttons report "not configured" instead.\n' +
+        '  (Ignore this if ANTHROPIC_BASE_URL points at a proxy or mock with a\n' +
+        '  key format of its own.)\n' +
+        '  ***************************************************************\n'
+      );
+    }
   });
 });

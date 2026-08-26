@@ -65,6 +65,22 @@ async function aiBusyMessage(res) {
   }
   return null;
 }
+// The three failures the server names because pressing the button again cannot
+// fix any of them: a rejected key is a config fix, a cut-off answer is a
+// max_tokens fix, a refusal is a prompt fix. The server sends the remedy with
+// the code; these are only the headings. Null-prototype so an unexpected code
+// cannot resolve to something off Object.prototype.
+const AI_FATAL_LABEL = Object.assign(Object.create(null), {
+  ai_key_rejected: 'AI key rejected',
+  ai_truncated: 'Answer cut off',
+  ai_refused: 'Request declined',
+});
+// null for anything unclassified — a dropped socket really is worth another go.
+async function aiFail(res) {
+  const d = await res.json().catch(() => null);
+  const label = d && AI_FATAL_LABEL[d.error];
+  return label ? { label, message: d.message || '' } : null;
+}
 async function aiCall(title, path, body) {
   aiShow(title, '<p class="empty">Thinking…</p>');
   let res;
@@ -75,7 +91,14 @@ async function aiCall(title, path, body) {
     aiShow(title, busy ? '<p class="empty">' + esc(busy) + '</p>' : aiNotConfigured());
     return null;
   }
-  if (!res.ok) { aiShow(title, '<p class="empty">AI request failed — try again.</p>'); return null; }
+  if (!res.ok) {
+    const f = await aiFail(res);
+    aiShow(title, f
+      ? '<div class="card tint"><p class="eyebrow">' + esc(f.label) + '</p>' +
+        '<p class="muted" style="margin:0">' + esc(f.message) + '</p></div>'
+      : '<p class="empty">AI request failed — try again.</p>');
+    return null;
+  }
   return res.json().catch(() => null);
 }
 function bullets(arr) {
