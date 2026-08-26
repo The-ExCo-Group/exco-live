@@ -150,6 +150,94 @@ async function aiSynth(pollId) {
   aiShow('Response synthesis', html);
 }
 
+function bullets(arr) {
+  return '<ul style="margin:6px 0 0;padding-left:20px">' +
+    arr.map((x) => '<li style="margin-bottom:4px">' + esc(x) + '</li>').join('') + '</ul>';
+}
+function aiSection(label, arr) {
+  if (!arr || !arr.length) return '';
+  return '<p class="eyebrow" style="margin:22px 0 0">' + label + '</p>' + bullets(arr);
+}
+// Verbatim, in the room's own words — these get read aloud, and nobody recognises
+// their own answer in a paraphrase.
+function wsQuotes(label, list, accent) {
+  if (!list || !list.length) return '';
+  return '<p class="eyebrow" style="margin:18px 0 0">' + label + '</p><div class="responses">' +
+    list.map((q) => '<div class="response" style="white-space:pre-wrap;border-left-color:' + accent + '">' +
+      esc(q) + '</div>').join('') + '</div>';
+}
+// Row by row in the sheet's own order: the facilitator reads the grid the way it
+// was printed, not the order boxes came back in. The server tallies against this
+// same grid, so a box it named is a box we can label.
+function wsCellGroups(groups, poll) {
+  const rows = poll.rows || [];
+  const cols = poll.columns || [];
+  if (!groups || !groups.length || !rows.length) return '';
+  const n = poll.gridCount || 0;
+  const fill = poll.cellFill || {};
+  return rows.map((r) => {
+    const boxes = cols.map((c) => {
+      const g = groups.find((x) => x.rowId === r.id && x.columnId === c.id);
+      if (!g) return '';
+      const themes = (g.themes || []).map((t) =>
+        '<div style="margin-top:12px"><b style="font-family:var(--font-display);font-size:15px">' + esc(t.label) + '</b>' +
+        '<p class="small" style="margin:4px 0 0">' + esc(t.detail) + '</p>' +
+        (t.examples || []).map((x) => '<p class="small muted" style="margin:6px 0 0">“' + esc(x) + '”</p>').join('') +
+        '</div>').join('');
+      return '<div class="card" style="margin-top:10px"><div class="row" style="align-items:baseline">' +
+        '<span class="type-chip">' + esc(c.text) + '</span>' +
+        '<span class="pill right">' + (fill[r.id + c.id] || 0) + ' of ' + n + '</span></div>' +
+        (g.note ? '<p class="small" style="margin:8px 0 0">' + esc(g.note) + '</p>' : '') + themes + '</div>';
+    }).join('');
+    return boxes ? '<p class="eyebrow" style="margin:20px 0 0">' + esc(r.text) + '</p>' + boxes : '';
+  }).join('');
+}
+// The sheet's own footnote makes measurability the point — "you can't measure this"
+// is not an answer — so the panel leads with the verdict and the verbatim answers
+// that fail it. Those are what gets read back to the room.
+async function aiWorksheet(pollId) {
+  const title = 'Worksheet analysis';
+  const d = await aiCall(title, '/api/room/' + CODE + '/ai/worksheet', { pollId });
+  if (!d) return;
+  if (d.insufficientData) {
+    aiShow(title, '<div class="card tint"><p class="eyebrow">Answers needed</p>' +
+      '<p class="muted" style="margin:0">' + esc(d.message || d.dataNotes ||
+        'There are not enough worksheet answers to analyse yet. Collect a few, then try again.') + '</p></div>');
+    return;
+  }
+  const poll = state.polls.find((p) => p.id === pollId) || {};
+  const m = d.measurability || {};
+  let html = d.overview ? '<p class="sub">' + esc(d.overview) + '</p>' : '';
+  html += '<div class="card tint"><p class="eyebrow">Measurability</p>' +
+    (m.verdict ? '<p style="margin:0;font-size:16px">' + esc(m.verdict) + '</p>' : '') +
+    wsQuotes('Answers that pass the test', m.strongExamples, 'var(--green)') +
+    wsQuotes('Read these back — no observer, or no signal', m.vagueExamples, 'var(--text)') +
+    aiSection('Questions that would sharpen them', wsSharpen(m.howToSharpen)) + '</div>';
+  if (d.gaps && d.gaps.length) {
+    html += '<div class="card" style="margin-top:14px"><p class="eyebrow">Boxes nobody could fill</p>' +
+      bullets(d.gaps) + '</div>';
+  }
+  const cells = wsCellGroups(d.cellGroups, poll);
+  if (cells) html += '<p class="eyebrow" style="margin:26px 0 0">Box by box</p>' + cells;
+  if (d.crossCutting && d.crossCutting.length) {
+    html += '<p class="eyebrow" style="margin:26px 0 0">Across the sheet</p>' + d.crossCutting.map((c) =>
+      '<div class="card" style="margin-top:10px"><b style="font-family:var(--font-display);font-size:16px">' + esc(c.title) + '</b>' +
+      '<p class="small" style="margin:6px 0 0">' + esc(c.detail) + '</p></div>').join('');
+  }
+  html += aiSection('Recommendations', d.recommendations);
+  // Counts are the server's own tally, not the model's — the facilitator quotes
+  // these at the room as fact, and a thin sample has to read as thin.
+  const n = d.sampleSize || 0;
+  html += '<p class="muted small" style="margin-top:26px">Built from ' + n + ' worksheet' + (n === 1 ? '' : 's') +
+    ' · ' + (d.filledCells || 0) + ' of ' + (d.totalCells || 0) + ' boxes got at least one answer.' +
+    (d.dataNotes ? ' ' + esc(d.dataNotes) : '') + '</p>';
+  if (n < 5) {
+    html += '<p class="small" style="margin:8px 0 0;border-left:2px solid var(--line-strong);padding-left:10px">' +
+      'Small sample — this describes these ' + n + ' worksheet' + (n === 1 ? '' : 's') + ', not the group.</p>';
+  }
+  aiShow(title, html);
+}
+
 async function aiDraft() {
   const topic = document.getElementById('pTopic').value.trim();
   if (!topic) { toast('Enter a topic to draft'); return; }
@@ -496,7 +584,8 @@ function renderStage() {
     '<span class="type-chip">' + TYPE_LABEL[poll.type] + '</span>' +
     '<span class="pill right">' + poll.totalVotes + (isWs ? ' worksheets' : ' responses') + '</span>' +
     (canSynth ? '<button class="btn ghost sm" onclick="aiSynth(\'' + poll.id + '\')">AI: Synthesize</button>' : '') +
-    (isWs ? '<button class="btn ghost sm" onclick="viewWorksheets(\'' + poll.id + '\')">View submissions</button>' : '') +
+    (isWs ? '<button class="btn ghost sm" onclick="aiWorksheet(\'' + poll.id + '\')">AI: Analyse worksheet</button>' +
+      '<button class="btn ghost sm" onclick="viewWorksheets(\'' + poll.id + '\')">View submissions</button>' : '') +
     '<button class="btn ghost sm" onclick="api(\'/poll/' + poll.id + '/reset\')">Reset</button>' +
     '<button class="btn danger sm" onclick="api(\'/poll/' + poll.id + '/close\')">End</button>' +
     '</div>' +

@@ -215,6 +215,13 @@ function buildInput(poll) {
       (poll.instructions ? '<p class="ws-intro">' + esc(poll.instructions) + '</p>' : '') +
       '<div id="voteState"></div>' +
       '<div id="voteInputs">' +
+      // Offered ABOVE the grid: after nine boxes of typing the photo is worthless.
+      // #wsPhotoMsg is the only node the photo flow ever rewrites as a string.
+      '<div class="ws-photo" id="wsPhotoIntro">' +
+      '<input type="file" id="wsPhotoFile" class="hidden" accept="image/*" capture="environment" onchange="wsPhotoPicked(this)" />' +
+      '<button class="btn ghost sm" id="wsPhotoBtn" onclick="wsPhotoPick()">Use a photo instead</button>' +
+      '<span class="small muted ws-photo-hint">Filled it in on paper? Photograph the sheet and we\'ll type it up for you to check.</span>' +
+      '</div><div id="wsPhotoMsg"></div>' +
       (poll.rowHeader ? '<p class="eyebrow ws-head">' + esc(poll.rowHeader) + '</p>' : '') +
       '<div id="wsGrid" data-poll="' + poll.id + '">' + groups + '</div>' +
       (poll.footnote ? '<p class="ws-foot">' + esc(poll.footnote) + '</p>' : '') +
@@ -320,18 +327,25 @@ function wsCells() {
   return Array.prototype.slice.call(document.querySelectorAll('#wsGrid textarea[data-cell]'));
 }
 function wsCountText(n, total) { return n + ' of ' + total + ' boxes filled — partial is fine'; }
+function wsTotal(poll) { return (poll.rows || []).length * (poll.columns || []).length; }
+// Shared, because the photo path sets .value directly and no 'input' event fires
+// for it — the count would sit at the pre-photo number until the next keystroke.
+function wsSyncCount(total) {
+  const c = document.getElementById('wsCount');
+  if (c) c.textContent = wsCountText(wsCells().filter((x) => x.value.trim()).length, total);
+}
 
 function mountWorksheet(poll) {
   const grid = document.getElementById('wsGrid');
   if (!grid) return;
-  const total = (poll.rows || []).length * (poll.columns || []).length;
+  const total = wsTotal(poll);
+  wsPhotoReset();
   // ONE delegated listener on the container. Nine inline handlers would mean nine
   // closures rebuilt on every poll swap, and no place to hang the debounce.
   grid.addEventListener('input', (e) => {
     const t = e.target;
     if (!t || !t.dataset || !t.dataset.cell) return;
-    const c = document.getElementById('wsCount');
-    if (c) c.textContent = wsCountText(wsCells().filter((x) => x.value.trim()).length, total);
+    wsSyncCount(total);
     wsQueueDraft(poll.id);
   });
 }
@@ -388,7 +402,12 @@ async function submitWorksheet(pollId) {
   // clears the draft and hides the grid, so the sentence just disappears.
   for (const t of wsCells()) t.readOnly = true;
   try {
-    const r = await api('/poll/' + pollId + '/worksheet', { cells, author: NAME, source: 'typed' });
+    // The pre-edit transcription rides along with the corrected cells: the gap
+    // between the two is the only honest answer to "is OCR good enough for this
+    // room's handwriting", and it costs ~1 KB with none of the photo's PII.
+    const r = await api('/poll/' + pollId + '/worksheet', wsOcrRaw
+      ? { cells, author: NAME, source: 'photo', ocrRaw: wsOcrRaw }
+      : { cells, author: NAME, source: 'typed' });
     if (r.ok) {
       wsClearDraft(pollId);
       markDone('poll_' + pollId, filled);
@@ -401,6 +420,291 @@ async function submitWorksheet(pollId) {
       toast('Could not send — try again');
     }
   } finally { delete inFlight[pollId]; }
+}
+
+// ---- worksheet: the photo lane --------------------------------------------
+// A file input with `capture`, not getUserMedia: it opens the native camera on
+// iOS and Android, it survives the in-app browsers people actually join from
+// (Teams, Outlook, LinkedIn) where getUserMedia is blocked or permission-gated,
+// and on a laptop it degrades to a file picker. No permission plumbing to break.
+//
+// OCR never submits anything. It proposes text into the boxes the participant is
+// already looking at, and they press Send on it themselves — so the worst a bad
+// read can cost is a minute of correcting, never a machine's guess going on the
+// record as their words. Typing stays live the whole time: nothing below blocks,
+// hides or disables the grid.
+const WS_MAX_EDGE = 1568;    // the vision model's long edge — pixels past it are bytes it throws away anyway
+const WS_B64_MAX = 900000;   // the server takes 6e6 of base64; this keeps the upload survivable on venue wifi
+const WS_STATUS_MS = 3000;
+
+let wsOcrBusy = false;
+let wsOcrRaw = null;         // the model's pre-edit transcription, sent with the corrected cells
+let wsOcrApplied = {};       // what we wrote into each box, so a retake can tell its own text from theirs
+let wsStatusTimer = null;
+
+function wsPhotoReset() {
+  wsStatusStop();
+  wsOcrBusy = false;
+  wsOcrRaw = null;
+  wsOcrApplied = {};
+}
+
+// Every await below hands the host a window to swap the poll underneath us.
+// Writing OCR into whatever grid happens to be on screen afterwards would put
+// one worksheet's answers into another's boxes.
+function wsGridIs(pollId) {
+  const g = document.getElementById('wsGrid');
+  return !!g && g.dataset.poll === pollId;
+}
+
+function wsPhotoPick() {
+  if (wsOcrBusy) return;
+  // Opening the camera backgrounds the tab, and iOS discards backgrounded tabs
+  // freely. Anything typed since the last 400ms debounce tick exists only in
+  // wsPending, so flush it synchronously before handing control to the OS —
+  // otherwise the photo path is itself the likeliest way to lose typing.
+  wsFlushDraft();
+  const f = document.getElementById('wsPhotoFile');
+  if (f) f.click();
+}
+
+async function wsPhotoPicked(input) {
+  const file = input.files && input.files[0];
+  input.value = '';   // without this, re-picking the SAME photo fires no change event at all
+  if (!file || wsOcrBusy) return;
+  const poll = currentPoll();
+  if (!poll || poll.type !== 'worksheet' || !wsGridIs(poll.id) || isDone('poll_' + poll.id)) return;
+  const pollId = poll.id;
+  wsOcrBusy = true;
+  const btn = document.getElementById('wsPhotoBtn');
+  if (btn) btn.disabled = true;
+  wsPhotoNote(pollId, 'Reading your photo — this takes a few seconds.', false);
+  wsStatusStart(pollId);
+  try {
+    let b64;
+    try { b64 = await wsShrink(file); }
+    catch (e) {
+      return wsPhotoNote(pollId, e && e.message === 'too_big'
+        ? 'That photo is still too large to send even after shrinking it. Try again in better light, or type your answers in.'
+        : 'That file could not be read as a photo. Try another one, or type your answers in.', true);
+    }
+    let res;
+    let data;
+    try {
+      // Deliberately NOT api(): that retries 5xx, and a 503 here means this photo
+      // already took a queue slot. A retry would take a second one off the room.
+      res = await fetch('/api/room/' + CODE + '/poll/' + pollId + '/ocr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: b64, mediaType: 'image/jpeg' }),
+      });
+      data = await res.json().catch(() => ({}));
+    } catch (e) {
+      return wsPhotoNote(pollId, 'We could not reach the server. Check your signal and try again, or type your answers in.', true);
+    }
+    if (!wsGridIs(pollId) || isDone('poll_' + pollId)) return;
+    // submitWorksheet snapshotted the cells before it started retrying. Filling
+    // boxes now would show text that is not in what the host is about to receive.
+    if (inFlight[pollId]) return wsPhotoNote(pollId, 'Your worksheet was already on its way to the host, so nothing from the photo was added.', false);
+    // ai_not_configured is the one failure a retry cannot fix, so it gets no button.
+    if (!res.ok) return wsPhotoNote(pollId, wsHttpMessage(res.status, data), data.error !== 'ai_not_configured');
+    if (data.match === false) return wsPhotoNote(pollId, data.message || 'Nothing could be read from that photo. Try another one, or type your answers in.', true);
+    wsApplyOcr(poll, data);
+  } finally {
+    wsStatusStop();
+    wsOcrBusy = false;
+    const b = document.getElementById('wsPhotoBtn');
+    if (b) b.disabled = false;
+  }
+}
+
+// Every outcome — queued, filled, failed — lands in the one card, so there is
+// only ever one place to look for what happened to the photo.
+function wsPhotoNote(pollId, text, retry) {
+  if (!wsGridIs(pollId)) return;
+  const box = document.getElementById('wsPhotoMsg');
+  if (!box) return;
+  const intro = document.getElementById('wsPhotoIntro');
+  if (intro) intro.classList.add('hidden');   // the card carries the retry button from here on
+  box.innerHTML = '<div class="card tint ws-photo-msg"><p>' + esc(text) + '</p>' +
+    (retry ? '<button class="btn ghost sm" onclick="wsPhotoPick()">Try another photo</button>' : '') + '</div>';
+}
+
+function wsHttpMessage(status, d) {
+  if (status === 413 || d.error === 'payload_too_large') return 'That photo was too large to send. Try again in better light, or type your answers in.';
+  if (d.error === 'ai_not_configured') return 'Reading photos is not switched on for this session — please type your answers in.';
+  if (status === 503) {
+    const s = d.retryAfterSeconds;
+    return 'Photos are queued right now — try again in ' + (s > 0 ? 'about ' + s + 's' : 'a moment') + ', or type your answers in.';
+  }
+  if (status === 409 || status === 404) return 'The host has moved on from this worksheet, so nothing was read.';
+  if (status === 400) return 'That file could not be read as a photo. Try another one, or type your answers in.';
+  return 'Something went wrong reading that photo. Try another one, or type your answers in.';
+}
+
+// ---- downscale ------------------------------------------------------------
+async function wsShrink(file) {
+  const src = await wsDecode(file);
+  try {
+    let b64 = await wsEncode(src, 0.8);
+    // One retry at a lower quality, then stop. A third pass costs another few
+    // seconds of staring at a phone to save bytes that were never the problem.
+    if (b64.length > WS_B64_MAX) b64 = await wsEncode(src, 0.6);
+    if (b64.length > WS_B64_MAX) throw new Error('too_big');
+    return b64;
+  } finally { if (src.close) src.close(); }
+}
+
+// imageOrientation is doing more work than it looks: iOS writes a portrait photo
+// as landscape pixels plus an EXIF rotation flag, and createImageBitmap ignores
+// that flag unless asked. A sideways worksheet is the single biggest cause of a
+// bad read. Older Safari has no options bag — there, <img> applies the rotation
+// itself, which is why the fallback is a decode and not an error.
+function wsDecode(file) {
+  if (window.createImageBitmap) {
+    try { return createImageBitmap(file, { imageOrientation: 'from-image' }).catch(() => wsDecodeImg(file)); }
+    catch (e) { /* threw on the options bag — fall through to the <img> path */ }
+  }
+  return wsDecodeImg(file);
+}
+
+function wsDecodeImg(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    // HEIC straight off an iPhone lands here: nothing decodes it, and a plain
+    // "could not read that photo" is more use than a broken upload.
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('decode')); };
+    img.src = url;
+  });
+}
+
+function wsEncode(src, quality) {
+  const w = src.width || src.naturalWidth;
+  const h = src.height || src.naturalHeight;
+  if (!w || !h) return Promise.reject(new Error('decode'));
+  const k = Math.min(1, WS_MAX_EDGE / Math.max(w, h));
+  const cv = document.createElement('canvas');
+  cv.width = Math.max(1, Math.round(w * k));
+  cv.height = Math.max(1, Math.round(h * k));
+  cv.getContext('2d').drawImage(src, 0, 0, cv.width, cv.height);
+  return new Promise((resolve, reject) => {
+    cv.toBlob((blob) => {
+      if (!blob) return reject(new Error('encode'));
+      const fr = new FileReader();
+      fr.onload = () => {
+        const url = String(fr.result);
+        resolve(url.slice(url.indexOf(',') + 1));   // drop the data: prefix — the server takes bare base64
+      };
+      fr.onerror = () => reject(new Error('read'));
+      fr.readAsDataURL(blob);
+    }, 'image/jpeg', quality);
+  });
+}
+
+// ---- review ---------------------------------------------------------------
+// Values only. Rewriting #wsGrid as a string would wipe whatever is half-typed
+// in the other boxes and reset the lastPollId guard that stops it happening on
+// every SSE tick.
+function wsApplyOcr(poll, data) {
+  const cells = data.cells || {};
+  const unread = new Set(data.unreadable || []);
+  const prev = wsOcrApplied;
+  wsOcrApplied = {};
+  let n = 0;
+  let m = 0;
+  let kept = 0;
+  let carried = 0;
+  for (const t of wsCells()) {
+    const key = t.dataset.cell;
+    const field = t.closest('.ws-field') || t.parentNode;
+    field.classList.remove('ws-from-photo', 'ws-unread');
+    wsCellNote(field, '');
+    const text = cells[key] || '';
+    // Does THIS read have anything to say about this box?
+    const says = !!text || unread.has(key);
+    // Does the box still hold the previous read, untouched?
+    const wasOurs = !!prev[key] && t.value === prev[key];
+    // A retake replaces the previous read, but only where the new read actually
+    // supplies something. People retake because one row came out badly, so the
+    // second photo is often a closer crop that misses boxes the first one got —
+    // clearing those would silently delete answers already reviewed and accepted.
+    if (wasOurs && says) t.value = '';
+    if (wasOurs && !says) {
+      wsOcrApplied[key] = prev[key];   // still ours, so a third retake can replace it
+      field.classList.add('ws-from-photo');
+      wsCellNote(field, 'From your photo — check it', 'ws-note-photo');
+      carried++;
+      continue;
+    }
+    const mine = t.value.trim();
+    if (mine) {
+      if (text || unread.has(key)) kept++;
+      continue;
+    }
+    if (text) {
+      t.value = text;
+      wsOcrApplied[key] = text;
+      field.classList.add('ws-from-photo');
+      wsCellNote(field, 'From your photo — check it', 'ws-note-photo');
+      n++;
+    } else if (unread.has(key)) {
+      // Left empty on purpose and said so. A guess here reads as correct and
+      // gets submitted; a gap is the one thing they can see and fix.
+      field.classList.add('ws-unread');
+      wsCellNote(field, 'We couldn\'t read your handwriting here', 'ws-note-unread');
+      m++;
+    }
+  }
+  // Merge, don't replace: boxes carried over from an earlier read still hold
+  // that read's text, and ocrRaw is what the edit-rate audit compares against.
+  wsOcrRaw = Object.assign({}, wsOcrRaw || {}, cells);
+  wsSyncCount(wsTotal(poll));
+  wsQueueDraft(poll.id);   // photo text is a draft like any other — a reload must not lose it
+  wsPhotoNote(poll.id, 'We filled in ' + n + (n === 1 ? ' box' : ' boxes') + ', couldn\'t read ' + m +
+    ', and left ' + kept + ' you\'d already typed' +
+    (carried ? ' and ' + carried + ' from your last photo' : '') +
+    '. Read it over, fix anything wrong, then submit.', true);
+}
+
+// One note element per box, reused rather than appended, or a second photo would
+// stack a second hint under every cell.
+function wsCellNote(field, text, cls) {
+  let note = field.querySelector('.ws-cell-note');
+  if (!text) { if (note) note.parentNode.removeChild(note); return; }
+  if (!note) { note = document.createElement('p'); field.appendChild(note); }
+  note.className = 'ws-cell-note ' + cls;
+  note.textContent = text;
+}
+
+// ---- queue position -------------------------------------------------------
+function wsStatusStart(pollId) {
+  wsStatusStop();
+  wsStatusTimer = setInterval(() => wsStatusTick(pollId), WS_STATUS_MS);
+  wsStatusTick(pollId);
+}
+function wsStatusStop() { clearInterval(wsStatusTimer); wsStatusTimer = null; }
+
+// "About 30s" beats a spinner: a queued photo behind twenty others is a real
+// wait, and a participant who knows that goes back to typing instead of
+// re-taking it. The depth counts THIS photo, hence the -1. A server without the
+// endpoint is not a failure worth reporting — the generic line just stays.
+async function wsStatusTick(pollId) {
+  if (!wsOcrBusy) return;
+  let d;
+  try {
+    const r = await fetch('/api/ocr-status');
+    if (!r.ok) return wsStatusStop();
+    d = await r.json();
+  } catch (e) { return; }
+  if (!wsOcrBusy || !wsGridIs(pollId) || !d) return;
+  const ahead = Math.max(0, (d.running || 0) + (d.waiting || 0) - 1);
+  const eta = d.etaSeconds > 0 ? ', about ' + d.etaSeconds + 's' : '';
+  wsPhotoNote(pollId, ahead
+    ? ahead + (ahead === 1 ? ' photo ahead of yours' : ' photos ahead of yours') + eta +
+      '. Carry on typing if you like — this will not interrupt you.'
+    : 'Reading your photo now' + eta + '.', false);
 }
 
 // ---- QA -------------------------------------------------------------------

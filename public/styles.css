@@ -269,3 +269,21 @@ code { font-family: ui-monospace, Menlo, monospace; font-size: 0.92em; backgroun
   .ws-fields[data-cols="2"] { grid-template-columns: repeat(2, 1fr); }
   .ws-fields[data-cols="4"] { grid-template-columns: repeat(4, 1fr); }
 }
+
+/* ---- Worksheet photo lane (participant) ----
+   The camera path onto the same typed grid above. Everything here is marker and
+   message chrome only: the photo flow sets textarea values and toggles these
+   classes, it never rebuilds the grid, so none of the .ws-* rules above move. */
+.ws-photo { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin: 0 0 16px; }
+.ws-photo-hint { flex: 1; min-width: 210px; }
+/* Queued, filled or failed, every outcome renders into this one card — one place
+   to look for what happened to the photo, and one shape to fail into. */
+.ws-photo-msg { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 14px; margin: 0 0 16px; padding: 16px 18px; }
+.ws-photo-msg p { flex: 1; min-width: 220px; margin: 0; font-size: 14px; line-height: 1.5; }
+/* Green edge: the machine typed this, not you. Dashed: it tried and failed here,
+   so the box is deliberately empty rather than quietly skipped. Padding drops a
+   pixel to keep the text where the untouched boxes hold it. */
+.ws-field.ws-from-photo textarea { border-left: 2px solid var(--green); padding-left: 13px; }
+.ws-field.ws-unread textarea { border-style: dashed; }
+.ws-cell-note { margin: 6px 0 0; font-size: 12px; line-height: 1.4; color: var(--muted); }
+.ws-cell-note.ws-note-unread { color: var(--text); }

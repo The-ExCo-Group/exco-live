@@ -65,10 +65,10 @@ async function aiBusyMessage(res) {
   }
   return null;
 }
-async function aiCall(title, path) {
+async function aiCall(title, path, body) {
   aiShow(title, '<p class="empty">Thinking…</p>');
   let res;
-  try { res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); }
+  try { res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }); }
   catch { aiShow(title, '<p class="empty">Network error — try again.</p>'); return null; }
   if (res.status === 503) {
     const busy = await aiBusyMessage(res);
@@ -80,6 +80,14 @@ async function aiCall(title, path) {
 }
 function bullets(arr) {
   return (arr && arr.length) ? '<ul style="margin:6px 0 0;padding-left:20px">' + arr.map((x) => '<li style="margin-bottom:4px">' + esc(x) + '</li>').join('') + '</ul>' : '<p class="muted small">—</p>';
+}
+// The server verifies these are verbatim substrings of what the room wrote, and
+// the facilitator reads them back aloud — so they render as the room's own words,
+// not as bullets that invite a paraphrase.
+function aiQuotes(label, arr) {
+  if (!arr || !arr.length) return '';
+  return '<p class="eyebrow" style="margin-top:14px">' + label + '</p><div class="responses">' +
+    arr.map((q) => '<div class="response" style="white-space:pre-wrap">' + esc(q) + '</div>').join('') + '</div>';
 }
 async function aiDebrief(code) {
   const d = await aiCall('Session debrief', '/api/room/' + code + '/ai/debrief');
@@ -97,6 +105,58 @@ async function aiDebrief(code) {
       ' across ' + plural(d.stats.polls || 0, 'poll') + ' and ' + plural(d.stats.questions || 0, 'audience question') + '.</p>';
   }
   aiShow('Session debrief', html);
+}
+// Same section order as the presenter's read-out, so a facilitator who ran the
+// analysis in the room recognises the write-up afterwards.
+async function aiWorksheet(code, pollId) {
+  const title = 'Worksheet analysis';
+  const d = await aiCall(title, '/api/room/' + code + '/ai/worksheet', { pollId });
+  if (!d) return;
+  if (d.insufficientData) { aiShow(title, aiInsufficient(d)); return; }
+  // cellGroups carry row/column ids, which only mean something against the sheet
+  // they came from — and the analysis response does not carry the box headings.
+  const p = detailPolls.find((x) => x.id === pollId) || {};
+  const labelOf = (arr, key) => { const hit = (arr || []).find((x) => x.id === key); return hit ? hit.text : key; };
+
+  let html = '<p class="sub">' + esc(d.overview || '') + '</p>';
+  const m = d.measurability || {};
+  html += '<div class="card tint"><p class="eyebrow">Measurability</p>' +
+    '<p style="margin:0">' + esc(m.verdict || '') + '</p>' +
+    aiQuotes('Answers that pass', m.strongExamples) +
+    aiQuotes('Answers that do not', m.vagueExamples) +
+    aiSection('Questions that would sharpen these', m.howToSharpen) + '</div>';
+  html += aiSection('Gaps', d.gaps);
+
+  if (d.cellGroups && d.cellGroups.length) {
+    html += '<p class="eyebrow" style="margin-top:14px">Box by box</p>' + d.cellGroups.map((g) =>
+      '<div class="card" style="margin-bottom:12px">' +
+      '<b style="font-family:var(--font-display);font-size:16px">' + esc(labelOf(p.rows, g.rowId)) +
+      ' · ' + esc(labelOf(p.columns, g.columnId)) + '</b>' +
+      '<p class="small muted" style="margin:6px 0 0">' + esc(g.note || '') + '</p>' +
+      (g.themes || []).map((t) =>
+        '<p class="small" style="margin:12px 0 0"><b>' + esc(t.label || '') + '</b> — ' + esc(t.detail || '') + '</p>' +
+        '<ul style="margin:6px 0 0;padding-left:20px">' + (t.examples || []).map((e) =>
+          '<li class="small muted" style="margin-bottom:4px">“' + esc(e) + '”</li>').join('') + '</ul>').join('') +
+      '</div>').join('');
+  }
+  if (d.crossCutting && d.crossCutting.length) {
+    html += '<p class="eyebrow" style="margin-top:14px">Across boxes</p>' + d.crossCutting.map((c) =>
+      '<div class="card" style="margin-bottom:12px"><b style="font-family:var(--font-display);font-size:16px">' + esc(c.title || '') + '</b>' +
+      '<p class="small" style="margin:6px 0 0">' + esc(c.detail || '') + '</p></div>').join('');
+  }
+  html += aiSection('Recommendations', d.recommendations);
+
+  // Counted by the server, never by the model. Boxes here means boxes on the
+  // sheet that got at least one answer, not cells filled across all worksheets.
+  html += '<p class="muted small" style="margin-top:18px">Built from ' + plural(d.sampleSize || 0, 'worksheet') +
+    ' · ' + (d.filledCells || 0) + ' of ' + (d.totalCells || 0) + ' boxes answered.</p>';
+  // Matches the server's small-sample gate, which stops the model writing "the
+  // group" below this line — say so rather than leaving the reader to notice.
+  if ((d.sampleSize || 0) < 5) {
+    html += '<p class="muted small" style="margin:6px 0 0">Fewer than five worksheets — this describes these respondents, not the group.</p>';
+  }
+  if (d.dataNotes) html += '<p class="muted small" style="margin:6px 0 0">' + esc(d.dataNotes) + '</p>';
+  aiShow(title, html);
 }
 async function aiTrends() {
   const d = await aiCall('Cross-event trends', '/api/ai/trends');
@@ -166,6 +226,10 @@ async function delSession(code, title) {
 }
 
 // ---- detail ---------------------------------------------------------------
+// The worksheet analysis comes back keyed by row/column id, so the open session's
+// polls stay to hand to turn those ids back into the headings on the sheet.
+let detailPolls = [];
+
 async function openDetail(code) {
   const modal = document.getElementById('detailModal');
   document.getElementById('detailBody').innerHTML = '<p class="empty">Loading…</p>';
@@ -183,11 +247,16 @@ async function openDetail(code) {
   document.getElementById('detailMeta').textContent =
     d.code + ' · ' + fmtDate(d.createdAt) + (d.endedAt ? ' · ended ' + fmtDate(d.endedAt) : ' · live');
 
+  detailPolls = d.polls || [];
+
   let html = '';
   if (!d.polls.length) html += '<p class="empty">No polls were run in this session.</p>';
   d.polls.forEach((p) => {
     html += '<div class="card" style="margin-bottom:16px">' +
       '<div class="row" style="align-items:center"><span class="type-chip">' + TYPE_LABEL[p.type] + '</span>' +
+      (p.type === 'worksheet'
+        ? '<button class="btn ghost sm" onclick="aiWorksheet(\'' + esc(code) + '\',\'' + esc(p.id) + '\')">AI: Analyse worksheet</button>'
+        : '') +
       '<span class="pill right">' + p.totalVotes + ' response' + (p.totalVotes === 1 ? '' : 's') + '</span></div>' +
       '<div class="big-q" style="font-size:22px;margin:10px 0 14px">' + esc(p.question) + '</div>' +
       renderResult(p) + '</div>';
@@ -251,8 +320,17 @@ function renderResult(p) {
     if (!grids.length || !rows.length || !cols.length) return '<p class="muted small">No worksheets submitted.</p>';
     const n = grids.length;
     const answersFor = (key) => grids
-      .map((g) => ({ text: String((g.cells || {})[key] || '').trim(), author: g.author }))
+      .map((g) => ({ text: String((g.cells || {})[key] || '').trim(), author: g.author, photo: g.source === 'photo' }))
       .filter((a) => a.text);
+    // Photo answers were OCR'd and then reviewed by the participant before they
+    // submitted, so they are as trustworthy as typed ones — but a facilitator
+    // querying an odd wording wants to know a camera was in the chain. Anonymous
+    // is normal here, so the marker cannot hang off a name.
+    const meta = (a) => {
+      const name = a.author ? '— ' + esc(a.author) : '';
+      const src = a.photo ? (name ? ' · from photo' : 'From photo') : '';
+      return (name || src) ? '<div class="small muted" style="margin-top:6px">' + name + src + '</div>' : '';
+    };
     let filled = 0, html = '';
     rows.forEach((r) => {
       html += '<p class="eyebrow" style="margin-top:16px">' + esc(r.text) + '</p>';
@@ -265,7 +343,7 @@ function renderResult(p) {
           // Answers keep their newlines (the server stores them via cleanMulti), and a
           // collapsed multi-line answer reads as one run-on sentence.
           ? '<div class="responses">' + got.map((a) => '<div class="response" style="white-space:pre-wrap">' + esc(a.text) +
-            (a.author ? '<div class="small muted" style="margin-top:6px">— ' + esc(a.author) + '</div>' : '') + '</div>').join('') + '</div>'
+            meta(a) + '</div>').join('') + '</div>'
           // A box nobody could fill is a finding for the facilitator, not a rendering gap.
           : '<p class="muted small" style="margin:0">Nobody answered this box.</p>';
       });
