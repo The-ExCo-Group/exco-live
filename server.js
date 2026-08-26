@@ -1292,7 +1292,11 @@ function aiWorksheetOcr(poll, buf, mediaType) {
       if (t) cells[k] = t;
       // Which boxes, not how many: the participant is about to be shown this
       // grid and asked to fill the gaps, and a bare count points at nothing.
-      if (c.unreadable) unreadable.push(k);
+      // Only when the box came back EMPTY: models do return text alongside an
+      // unreadable flag (seen on a real call), and a box that transcribed is not
+      // a gap to fill. Left in, it contradicts `cells` and makes filled +
+      // unreadable exceed the number of boxes on the sheet.
+      if (c.unreadable && !t) unreadable.push(k);
     });
     const filled = Object.keys(cells).length;
     if (r.documentMatch !== 'match') {
