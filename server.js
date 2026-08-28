@@ -1226,6 +1226,15 @@ function aiTrends(details, totalSessions) {
 // pressing submit on text they have read and corrected. Wiring OCR straight into
 // grids would put a machine's guess at someone's handwriting into the record as
 // their own words — do not connect these two.
+// Author- and participant-facing text limits. These exist to stop a stray paste
+// from bloating the payload every phone receives, not to shape what anyone can
+// say — a 202-character question silently losing its last word is the bug they
+// were causing. Set well above any real answer.
+const QUESTION_MAX = 2000;   // a question may set out a scenario before it asks
+const ANSWER_MAX = 1500;     // "name three behaviours" needs room for three
+const ASK_MAX = 500;         // audience Q&A
+const TITLE_MAX = 200;
+const OPTION_MAX = 300;
 const OCR_CELL_MAX = 400;   // same ceiling the typed path applies, so an edited cell survives submission unchanged
 function aiWorksheetOcr(poll, buf, mediaType) {
   const rows = poll.rows || [];
@@ -2040,7 +2049,7 @@ function makePoll(def) {
   const poll = {
     id: id(),
     type,
-    question: clean(def.question, 200) || 'Untitled question',
+    question: clean(def.question, QUESTION_MAX) || 'Untitled question',
     state: 'draft',
     options: [],
     scaleMax: 5,
@@ -2060,7 +2069,7 @@ function makePoll(def) {
   if (type === 'multiple_choice') {
     const opts = Array.isArray(def.options) ? def.options : [];
     poll.options = opts
-      .map((t) => clean(t, 120))
+      .map((t) => clean(t, OPTION_MAX))
       .filter(Boolean)
       .slice(0, 12)
       .map((t) => ({ id: id(), text: t }));
@@ -2094,7 +2103,7 @@ function makePoll(def) {
       poll.footnote = poll.footnote || MFI_WORKSHEET.footnote;
       poll.rows = gridAxis(MFI_WORKSHEET.rows, 120, 6, 'r');
       poll.columns = gridAxis(MFI_WORKSHEET.columns, 160, 4, 'c');
-      if (!clean(def.question, 200)) poll.question = MFI_WORKSHEET.title;
+      if (!clean(def.question, QUESTION_MAX)) poll.question = MFI_WORKSHEET.title;
     }
   }
   return poll;
@@ -2219,7 +2228,7 @@ async function handleApi(req, res, seg, url) {
     }
     rooms[code] = {
       code,
-      title: clean(body.title, 120) || 'Untitled session',
+      title: clean(body.title, TITLE_MAX) || 'Untitled session',
       createdAt: now(),
       polls,
       activePollId: null,
@@ -2654,7 +2663,7 @@ async function handleApi(req, res, seg, url) {
       }
       if (op === 'text' && poll.type === 'open_text') {
         if (applied(poll, clean(body.sid, 64))) return send(res, 200, { ok: true, duplicate: true });
-        const t = clean(body.text, 280);
+        const t = cleanMulti(body.text, ANSWER_MAX);
         if (t) {
           poll.responses.push({ id: id(), text: t, ts: now(), author: clean(body.author, 40) });
           if (poll.responses.length > 2000) poll.responses = poll.responses.slice(-2000);
@@ -2712,7 +2721,7 @@ async function handleApi(req, res, seg, url) {
     // ---- Q&A board --------------------------------------------------
     if (action === 'question' && seg[3] === undefined) {
       if (applied(room, clean(body.sid, 64))) return send(res, 200, { ok: true, duplicate: true });
-      const text = clean(body.text, 280);
+      const text = clean(body.text, ASK_MAX);
       if (!text) return send(res, 400, { error: 'empty' });
       room.questions.push({ id: id(), text, votes: 0, voters: new Set(), ts: now(), author: clean(body.author, 40) });
       save(code);

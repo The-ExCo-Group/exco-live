@@ -328,7 +328,7 @@ function buildInput(poll) {
   // open_text
   return q +
     '<div id="voteState"></div>' +
-    '<div id="voteInputs"><textarea id="textInput" placeholder="Type your response…" maxlength="280"' +
+    '<div id="voteInputs"><textarea id="textInput" placeholder="Type your response…" maxlength="1500"' +
     ' oninput="boxKeep(\'' + poll.id + '\',this)">' + esc(boxDraft(poll.id)) + '</textarea>' +
     '<div style="height:10px"></div><button class="btn go full" onclick="submitText(\'' + poll.id +
     '\')">Send</button></div>';
