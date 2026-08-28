@@ -181,9 +181,20 @@ They are additive and safe to run on an existing database (existing rows backfil
 defaults). Run once in the Supabase SQL editor before deploying:
 
 ```sql
-alter table polls add column if not exists worksheet jsonb not null default '{}'::jsonb;
-alter table polls add column if not exists grids     jsonb not null default '[]'::jsonb;
+alter table polls add column if not exists worksheet  jsonb not null default '{}'::jsonb;
+alter table polls add column if not exists grids      jsonb not null default '[]'::jsonb;
+alter table polls add column if not exists submitters jsonb not null default '{}'::jsonb;
 ```
+
+`submitters` is what makes an answer revisable: it records which device gave
+which answer, so changing a vote moves the count instead of adding a second one.
+It is never broadcast, never exported and never in the CSV — it exists only so a
+participant can change their own mind.
+
+Run it BEFORE deploying the self-paced build. Without it PostgREST rejects the
+whole `polls` write batch, so **no poll of any type persists** — the dashboard
+still lists the session, with zero polls under it, and `/healthz?stats=1` shows
+`persistErrors` climbing.
 
 **An un-migrated table fails in two different shapes, and only one of them is loud.**
 

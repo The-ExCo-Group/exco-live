@@ -11,6 +11,28 @@ document.getElementById('hostUrl').textContent = location.host;
 document.getElementById('joinLink').textContent = joinUrl;
 if (window.QR) QR.render(document.getElementById('qr'), joinUrl, { size: 168 });
 
+// Ticks arrive in bursts — 120 ms apart while a room is answering — and each one
+// is a whole new room. Coalescing onto the next frame turns a burst into a single
+// render, and a backgrounded console (rAF does not fire there) into none at all
+// until it comes forward and paints the latest.
+let frameQueued = false;
+let ended = false;
+function schedule() {
+  if (frameQueued || ended) return;
+  frameQueued = true;
+  requestAnimationFrame(() => { frameQueued = false; render(); });
+}
+// A console left in a background tab queues a frame that may never be delivered,
+// and the flag above would then hold every later tick back — a facilitator who
+// checked their slides comes back to a screen frozen at the moment they left.
+// Clearing the flag here costs one duplicate render at worst; the paint guards
+// make that a no-op.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  frameQueued = false;
+  render();
+});
+
 function connect() {
   // stage view: the console renders every response, so it needs the full room payload — participants get a slim private one
   const es = new EventSource('/api/stream/' + CODE + '?view=stage');
@@ -18,14 +40,15 @@ function connect() {
     const d = JSON.parse(e.data);
     if (d.ended) { showEnded(); es.close(); return; }
     state = d;
-    render();
+    schedule();
   };
   es.onerror = () => {/* auto-reconnect */};
 }
 connect();
 
 function showEnded() {
-  ocrWatch(false);   // the body is about to be replaced, and #stage with it
+  ended = true;      // a frame queued behind this would render into a page that no longer has a stage
+  ocrWatch(false);   // the body is about to be replaced, and the OCR line with it
   document.body.innerHTML =
     '<div class="wrap" style="max-width:620px"><div class="card center" style="margin-top:80px">' +
     '<p class="eyebrow">Session ended</p><h2 style="border:0">This session has been closed.</h2>' +
@@ -377,7 +400,9 @@ function addOpt(val) {
     '" placeholder="Option text" /><button class="btn ghost sm" onclick="this.parentNode.remove()">✕</button>';
   box.appendChild(div);
 }
-async function createPoll(present) {
+// No "create and present": a poll is answerable from the moment it exists, so
+// creating one IS putting it in front of the room.
+async function createPoll() {
   const type = document.getElementById('pType').value;
   const question = document.getElementById('pQuestion').value.trim();
   if (!question) { toast('Add a question first'); return; }
@@ -403,9 +428,9 @@ async function createPoll(present) {
       return;
     }
   }
-  const { id } = await api('/poll', payload);
+  await api('/poll', payload);
   closeCreate();
-  if (present && id) await api('/poll/' + id + '/activate');
+  toast('Added to the run of show');
 }
 
 // ---- preload / import -----------------------------------------------------
@@ -534,103 +559,285 @@ async function loadAgenda(name) {
   toast('Loaded ' + (r.count || 0) + ' question' + (r.count === 1 ? '' : 's'));
 }
 
-// ---- navigation (seamless stepping through the run of show) ---------------
-function currentIndex() {
-  if (!state) return -1;
-  return state.polls.findIndex((p) => p.id === state.activePollId);
-}
-async function step(dir) {
-  if (!state || !state.polls.length) return;
-  let idx = currentIndex();
-  if (idx === -1) idx = dir > 0 ? 0 : 0;
-  else idx = Math.min(Math.max(idx + dir, 0), state.polls.length - 1);
-  const target = state.polls[idx];
-  if (target && target.id !== state.activePollId) await api('/poll/' + target.id + '/activate');
-}
 document.addEventListener('keydown', (e) => {
   const tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
   if (e.key === 'Escape') { hideJoinScreen(); return; }
   if (document.querySelector('.modal-bg:not(.hidden)')) return;
-  if (e.key === 'j' || e.key === 'J') { e.preventDefault(); toggleJoinScreen(); return; }
-  if (e.key === 'ArrowRight') { e.preventDefault(); step(1); }
-  if (e.key === 'ArrowLeft') { e.preventDefault(); step(-1); }
+  if (e.key === 'j' || e.key === 'J') { e.preventDefault(); toggleJoinScreen(); }
 });
+
+// ---- paint guards ---------------------------------------------------------
+// A tick is a whole new room, but a burst of answers usually moves one number in
+// one card. Rewriting innerHTML that has not changed relays out the entire run
+// of show on every frame — visible as scroll drift on a long stage, and it drops
+// whatever the facilitator was mid-selection on. So each region carries a
+// fingerprint of exactly the fields its renderer reads. Hashing a few thousand
+// characters costs microseconds; the layout it skips costs milliseconds.
+function hash(h, s) {
+  s = String(s);
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return h;
+}
+const hashAll = (h, ...xs) => xs.reduce(hash, h);
+const painted = Object.create(null);
+function paint(id, sig, build) {
+  const el = document.getElementById(id);
+  if (!el || painted[id] === sig) return;
+  painted[id] = sig;
+  el.innerHTML = build();
+}
+function setText(id, s) {
+  const el = document.getElementById(id);
+  if (el && el.textContent !== s) el.textContent = s;
+}
+
+// The run of show drives the rail and the progress panel alike, and both read
+// only these five fields, so one fingerprint covers both.
+function rosSig() {
+  let h = 5381;
+  for (const p of state.polls) h = hashAll(h, p.id, p.type, p.state, p.question, p.totalVotes);
+  return h;
+}
 
 // ---- render ---------------------------------------------------------------
 function render() {
-  if (!state) return;
-  document.getElementById('roomTitle').textContent = state.title || 'Session';
-  renderPollList();
+  if (ended || !state) return;
+  setText('roomTitle', state.title || 'Session');
+  const ros = rosSig();
+  paint('pollList', ros, pollListHtml);
+  paint('progressBody', ros, progressHtml);
   renderStage();
-  renderNav();
   renderQA();
 }
 
-function renderNav() {
-  const idx = currentIndex();
-  const total = state.polls.length;
-  const pos = document.getElementById('navPos');
-  const prev = document.getElementById('prevBtn');
-  const next = document.getElementById('nextBtn');
-  pos.textContent = total ? (idx === -1 ? '— / ' + total : (idx + 1) + ' / ' + total) : '0 questions';
-  prev.disabled = idx <= 0;
-  next.disabled = !total || idx >= total - 1;
-  next.textContent = idx === -1 && total ? 'Start ▶' : 'Next ▶';
-}
-
-function renderPollList() {
-  const box = document.getElementById('pollList');
-  if (!state.polls.length) { box.innerHTML = '<p class="small muted center">No questions preloaded yet.</p>'; return; }
-  box.innerHTML = state.polls
-    .map((p, i) => {
-      const isActive = p.id === state.activePollId;
-      return (
-        '<div class="poll-list-item ros ' + (isActive ? 'active' : '') + '">' +
-        '<div class="pli-main">' +
-        '<span class="idx">' + (i + 1) + '</span>' +
-        '<div class="grow"><div class="type-chip">' + TYPE_LABEL[p.type] + '</div>' +
-        '<div class="pli-q">' + esc(p.question) + '</div></div>' +
-        (isActive ? '<span class="pill live"><span class="ping"></span>Live</span>' : '') +
-        '</div>' +
-        '<div class="pli-controls">' +
-        '<button class="btn ghost sm" title="Move up" onclick="api(\'/poll/' + p.id + '/move\',{dir:\'up\'})"' + (i === 0 ? ' disabled' : '') + '>↑</button>' +
-        '<button class="btn ghost sm" title="Move down" onclick="api(\'/poll/' + p.id + '/move\',{dir:\'down\'})"' + (i === state.polls.length - 1 ? ' disabled' : '') + '>↓</button>' +
-        '<span class="spacer"></span>' +
-        (isActive ? '' : '<button class="btn sm" onclick="api(\'/poll/' + p.id + '/activate\')">Present</button>') +
-        '<button class="btn ghost sm" title="Delete" onclick="delPoll(\'' + p.id + '\')">✕</button>' +
-        '</div></div>'
-      );
-    })
-    .join('');
+// The rail is the editor — order, delete, jump. What a question is *doing* is on
+// its stage card, which is where the answers are.
+function pollListHtml() {
+  const polls = state.polls;
+  if (!polls.length) return '<p class="small muted center">No questions preloaded yet.</p>';
+  return polls.map((p, i) =>
+    '<div class="poll-list-item ros">' +
+    '<div class="pli-main">' +
+    '<span class="idx">' + (i + 1) + '</span>' +
+    '<div class="grow"><div class="type-chip">' + TYPE_LABEL[p.type] +
+    (p.state === 'closed' ? ' · Closed' : '') + '</div>' +
+    '<div class="pli-q">' + esc(p.question) + '</div></div>' +
+    '<span class="pill">' + p.totalVotes + '</span>' +
+    '</div>' +
+    '<div class="pli-controls">' +
+    '<button class="btn ghost sm" title="Move up" onclick="api(\'/poll/' + p.id + '/move\',{dir:\'up\'})"' + (i === 0 ? ' disabled' : '') + '>↑</button>' +
+    '<button class="btn ghost sm" title="Move down" onclick="api(\'/poll/' + p.id + '/move\',{dir:\'down\'})"' + (i === polls.length - 1 ? ' disabled' : '') + '>↓</button>' +
+    '<span class="spacer"></span>' +
+    '<button class="btn ghost sm" onclick="jumpTo(\'' + p.id + '\')">Results</button>' +
+    '<button class="btn ghost sm" title="Delete" onclick="delPoll(\'' + p.id + '\')">✕</button>' +
+    '</div></div>').join('');
 }
 async function delPoll(id) { await api('/poll/' + id + '/delete'); }
+// One Reset per card now, twenty of them down a long stage — near enough to the
+// buttons a facilitator does press mid-session to be worth a question first.
+async function resetPoll(id) {
+  const p = state.polls.find((x) => x.id === id);
+  if (!confirm('Delete every answer to “' + (p ? p.question : 'this question') + '”? This cannot be undone.')) return;
+  await api('/poll/' + id + '/reset');
+}
+
+// ---- overall progress -----------------------------------------------------
+// Nobody registers to join, and the server never broadcasts who submitted what,
+// so the room has no attendance list. The busiest question is the closest thing
+// to a headcount: for these three types one device holds exactly one answer,
+// because going back and changing it replaces the old one. A word cloud counts
+// words and a worksheet counts sheets — one phone sends several of each — so
+// neither can be read as people.
+const HEADCOUNT_TYPE = { multiple_choice: true, rating: true, open_text: true };
+const isHeadcount = (p) => HEADCOUNT_TYPE[p.type] === true;
+const COUNT_NOUN = { word_cloud: 'word', worksheet: 'worksheet' };
+const nounOf = (p) => COUNT_NOUN[p.type] || 'response';
+const countNoun = (p, n) => nounOf(p) + (n === 1 ? '' : 's');
+
+function progress() {
+  const polls = state.polls;
+  const counted = polls.filter(isHeadcount);
+  const reach = counted.reduce((m, p) => Math.max(m, p.totalVotes), 0);
+  // "Has anyone got this far" needs no headcount, so worksheets and clouds count here.
+  let frontier = -1;
+  polls.forEach((p, i) => { if (p.totalVotes > 0) frontier = i; });
+  // The prefix everyone still answering has finished: it breaks at the first
+  // question short of the busiest one. A question with no headcount is skipped
+  // rather than assumed done — a worksheet cannot confirm the streak either way.
+  let together = -1;
+  if (reach) {
+    for (let i = 0; i < polls.length; i++) {
+      if (!isHeadcount(polls[i])) continue;
+      if (polls[i].totalVotes < reach) break;
+      together = i;
+    }
+  }
+  const answered = counted.reduce((a, p) => a + Math.min(p.totalVotes, reach), 0);
+  const pct = reach && counted.length ? Math.round((answered / (reach * counted.length)) * 100) : 0;
+  return { reach, frontier, together, pct, counted: counted.length };
+}
+
+function progressHtml() {
+  const polls = state.polls;
+  const head = '<div class="row" style="align-items:center"><p class="eyebrow" style="margin:0">Room progress</p>';
+  if (!polls.length) {
+    return head + '</div><p class="small muted" style="margin:14px 0 0">' +
+      'Add questions — the room can start on them the moment they exist.</p>';
+  }
+  const g = progress();
+  const total = polls.reduce((a, p) => a + p.totalVotes, 0);
+  const stat = g.counted
+    ? '<div class="stat-big stat-grad">' + g.pct + '%</div>' +
+      '<div class="muted">of the run of show answered' +
+      '<span class="small" style="display:block">averaged over the ' + g.counted + ' question' +
+      (g.counted === 1 ? '' : 's') + ' that count one answer per person</span></div>'
+    : '<div class="stat-big stat-grad">' + total + '</div>' +
+      '<div class="muted">answers in' +
+      '<span class="small" style="display:block">nothing here counts one answer per person, ' +
+      'so there is no headcount to measure against</span></div>';
+
+  const facts = [];
+  if (g.together >= 0) facts.push('All ' + g.reach + ' have answered through question ' + (g.together + 1) + '.');
+  facts.push(g.frontier >= 0
+    ? 'The furthest anyone has got is question ' + (g.frontier + 1) + ' of ' + polls.length + '.'
+    : 'Nobody has answered anything yet.');
+  if (polls.some((p) => !isHeadcount(p))) {
+    facts.push('Word clouds count words and worksheets count sheets — neither is a headcount.');
+  }
+
+  // Silent rather than "no answers yet" when a room of worksheets and clouds has
+  // plenty of answers and simply no headcount to state — the stat below says so.
+  const pill = g.reach ? g.reach + ' answering' : (total ? '' : 'No answers yet');
+  return head + (pill ? '<span class="pill right">' + pill + '</span>' : '') + '</div>' +
+    '<div class="row" style="align-items:baseline;gap:18px;margin:16px 0 12px">' + stat + '</div>' +
+    '<p class="small muted" style="margin:0 0 8px">' + facts.join(' ') + '</p>' +
+    polls.map((p, i) => progressRow(p, i, g.reach)).join('');
+}
+
+// One row per question in run-of-show order, so where the room has got to is the
+// row where the bars fall off. Clicking jumps to that question's live results.
+function progressRow(p, i, reach) {
+  const n = p.totalVotes;
+  const pct = reach ? Math.round((Math.min(n, reach) / reach) * 100) : 0;
+  const gauge = isHeadcount(p)
+    ? '<div class="bar-track" style="height:8px"><div class="bar-fill' + (reach && n >= reach ? ' lead' : '') +
+      '" style="width:' + Math.max(pct, n ? 4 : 0) + '%"></div></div>'
+    // No bar where there is nothing to measure against — the unit instead.
+    : '<span class="type-chip">' + nounOf(p) + 's</span>';
+  return '<div class="row tight" onclick="jumpTo(\'' + p.id + '\')" title="Jump to this question" ' +
+    'style="align-items:center;gap:12px;padding:9px 0;border-top:1px solid var(--line);cursor:pointer">' +
+    '<span style="font-family:var(--font-serif);color:var(--muted);min-width:18px;text-align:right">' + (i + 1) + '</span>' +
+    '<div class="grow" style="min-width:0;font-family:var(--font-display);font-weight:700;font-size:13px;' +
+    'line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(p.question) + '</div>' +
+    (p.state === 'closed' ? '<span class="type-chip">Closed</span>' : '') +
+    '<div style="flex:0 0 104px">' + gauge + '</div>' +
+    '<span class="small muted" style="flex:0 0 68px;text-align:right">' +
+    (isHeadcount(p) ? n + ' of ' + reach : n) + '</span></div>';
+}
+
+// ---- stage: the whole run of show, live -----------------------------------
+// Nothing is "on screen" any more — the room is spread across every question at
+// once — so the stage is one card per question, in order, each with its own
+// results. Cards are kept as elements rather than rebuilt from a string: only
+// the one whose numbers moved is rewritten, so a long stage neither jitters nor
+// loses the reader's place on every tick.
+const cards = new Map();    // pollId -> { el, sig }
+const folded = new Set();   // collapsed cards, held across ticks
+
+function pollSig(p, open, i) {
+  let h = hashAll(5381, p.id, p.type, p.state, p.question, i, p.totalVotes);
+  if (!open) return h;   // a folded card draws no results, so nothing below can change it
+  if (p.type === 'multiple_choice') {
+    for (const o of p.options) h = hashAll(h, o.id, o.text, p.votes[o.id] || 0);
+  } else if (p.type === 'rating') {
+    h = hashAll(h, p.scaleMax, p.scaleLabelLow, p.scaleLabelHigh, p.ratings.join(','));
+  } else if (p.type === 'word_cloud') {
+    // Not the length: one person revising "agile" to "fast" leaves the count alone.
+    for (const w of p.words) h = hash(h, w);
+  } else if (p.type === 'open_text') {
+    for (const r of p.responses) h = hashAll(h, r.id, r.text, r.author || '');
+  } else if (p.type === 'worksheet') {
+    h = hashAll(h, p.gridCount, p.rowHeader || '', p.instructions || '');
+    for (const r of p.rows || []) h = hashAll(h, r.id, r.text);
+    for (const c of p.columns || []) h = hashAll(h, c.id, c.text);
+    const fill = p.cellFill || {};
+    for (const k of Object.keys(fill)) h = hashAll(h, k, fill[k]);
+    for (const t of wsLabelTally(p)) h = hashAll(h, t.label, t.count);
+  }
+  return h;
+}
 
 function renderStage() {
-  const empty = document.getElementById('stageEmpty');
+  const emptyCard = document.getElementById('stageEmpty');
   const content = document.getElementById('stageContent');
-  const poll = state.polls.find((p) => p.id === state.activePollId);
-  if (!poll) { empty.classList.remove('hidden'); content.classList.add('hidden'); ocrWatch(false); return; }
-  empty.classList.add('hidden');
+  const foldBtn = document.getElementById('foldAllBtn');
+  const polls = state.polls;
+  // Only a worksheet can put anything in the OCR lane — but any of them can now.
+  ocrWatch(polls.some((p) => p.type === 'worksheet'));
+  setText('stageCount', polls.length ? polls.length + (polls.length === 1 ? ' question' : ' questions') : '');
+  if (!polls.length) {
+    emptyCard.classList.remove('hidden');
+    content.classList.add('hidden');
+    content.innerHTML = '';
+    cards.clear();
+    folded.clear();
+    foldBtn.classList.add('hidden');
+    return;
+  }
+  emptyCard.classList.add('hidden');
   content.classList.remove('hidden');
-  // Only a worksheet can put anything in the OCR lane.
-  ocrWatch(poll.type === 'worksheet');
+  foldBtn.classList.remove('hidden');
+  setText('foldAllBtn', polls.some((p) => !folded.has(p.id)) ? 'Collapse all' : 'Expand all');
 
+  const live = new Set(polls.map((p) => p.id));
+  for (const [pollId, c] of cards) {
+    if (live.has(pollId)) continue;
+    c.el.remove();
+    cards.delete(pollId);
+    folded.delete(pollId);
+  }
+  polls.forEach((p, i) => {
+    const open = !folded.has(p.id);
+    const sig = pollSig(p, open, i);
+    let c = cards.get(p.id);
+    if (!c) {
+      c = { el: document.createElement('div'), sig: null };
+      c.el.className = 'card';
+      c.el.id = 'card-' + p.id;
+      cards.set(p.id, c);
+    }
+    if (c.sig !== sig) { c.el.innerHTML = cardHtml(p, i, open); c.sig = sig; }
+    // Moving a question reorders the elements; it does not rebuild them.
+    if (content.children[i] !== c.el) content.insertBefore(c.el, content.children[i] || null);
+  });
+}
+
+function cardHtml(poll, i, open) {
+  // Legacy rows still say 'draft' or 'active' and the server treats both as open,
+  // so 'closed' is the only state left that means anything.
+  const closed = poll.state === 'closed';
   const canSynth = poll.type === 'open_text' || poll.type === 'word_cloud';
   const isWs = poll.type === 'worksheet';
   const head =
-    '<div class="row" style="align-items:center;margin-bottom:8px">' +
-    '<span class="type-chip">' + TYPE_LABEL[poll.type] + '</span>' +
+    '<div class="row" style="align-items:center;margin-bottom:10px">' +
+    '<button class="btn ghost sm" title="' + (open ? 'Collapse' : 'Expand') +
+    '" onclick="toggleFold(\'' + poll.id + '\')">' + (open ? '▾' : '▸') + '</button>' +
+    '<span class="type-chip">' + (i + 1) + ' · ' + TYPE_LABEL[poll.type] + '</span>' +
+    (closed ? '<span class="type-chip">Closed</span>' : '') +
     // Worksheets, not people: ~80 sheets can arrive from ~15 phones.
-    '<span class="pill right">' + poll.totalVotes + ' ' + (isWs ? 'worksheet' : 'response') +
-    (poll.totalVotes === 1 ? '' : 's') + '</span>' +
+    '<span class="pill right">' + poll.totalVotes + ' ' + countNoun(poll, poll.totalVotes) + '</span>' +
     (canSynth ? '<button class="btn ghost sm" onclick="aiSynth(\'' + poll.id + '\')">AI: Synthesize</button>' : '') +
     (isWs ? '<button class="btn ghost sm" onclick="aiWorksheet(\'' + poll.id + '\')">AI: Analyse worksheet</button>' +
       '<button class="btn ghost sm" onclick="viewWorksheets(\'' + poll.id + '\')">View submissions</button>' : '') +
-    '<button class="btn ghost sm" onclick="api(\'/poll/' + poll.id + '/reset\')">Reset</button>' +
-    '<button class="btn danger sm" onclick="api(\'/poll/' + poll.id + '/close\')">End</button>' +
+    '<button class="btn ghost sm" onclick="resetPoll(\'' + poll.id + '\')">Reset</button>' +
+    (closed
+      ? '<button class="btn sm" onclick="api(\'/poll/' + poll.id + '/activate\')">Reopen</button>'
+      : '<button class="btn danger sm" onclick="api(\'/poll/' + poll.id + '/close\')">Close</button>') +
     '</div>' +
-    '<div class="big-q">' + esc(poll.question) + '</div>';
+    // Down from the hero size the one-question stage used: these are stacked now.
+    '<div class="big-q" style="font-size:24px;margin:0 0 ' + (open ? '20px' : '0') + '">' + esc(poll.question) + '</div>';
+  if (!open) return head;
 
   let body = '';
   if (poll.type === 'multiple_choice') body = renderBars(poll);
@@ -638,7 +845,27 @@ function renderStage() {
   else if (poll.type === 'word_cloud') body = renderCloud(poll);
   else if (poll.type === 'open_text') body = renderResponses(poll);
   else if (poll.type === 'worksheet') body = renderWorksheetLive(poll);
-  content.innerHTML = head + body;
+  return head + body;
+}
+
+function toggleFold(pollId) {
+  if (folded.has(pollId)) folded.delete(pollId); else folded.add(pollId);
+  renderStage();
+}
+function toggleAll() {
+  if (!state) return;
+  const anyOpen = state.polls.some((p) => !folded.has(p.id));
+  folded.clear();
+  if (anyOpen) state.polls.forEach((p) => folded.add(p.id));
+  renderStage();
+}
+// Jumped to from the progress panel and the rail alike, so it unfolds first —
+// scrolling to a card collapsed down to its heading answers nothing.
+function jumpTo(pollId) {
+  folded.delete(pollId);
+  renderStage();
+  const el = document.getElementById('card-' + pollId);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 // Multiple choice: monochrome bars; the single leading bar carries the gradient.
@@ -814,28 +1041,14 @@ function renderWorksheetLive(poll) {
 }
 
 // ---- photo queue ----------------------------------------------------------
-// The OCR lane is process-wide and, until this line, invisible from the stage:
+// The OCR lane is process-wide and, until this line, invisible from the console:
 // the only way to see it was /healthz?stats=1 in another browser tab. Standing
 // in front of a room, the facilitator has to be able to tell "nobody has
-// submitted yet" from "twelve photos are still being read" before deciding to
-// move on. Appended to #stage, NOT into #stageContent, which renderStage
-// rewrites wholesale on every SSE tick.
+// submitted yet" from "twelve photos are still being read". It lives in the
+// progress card, which is painted from a fingerprint and never rewrites a line
+// it did not put there.
 const OCR_POLL_MS = 5000;
 let ocrTimer = null;
-
-function ocrLine() {
-  let el = document.getElementById('ocrQueue');
-  if (!el) {
-    const stage = document.getElementById('stage');
-    if (!stage) return null;   // showEnded() has replaced the page out from under a tick in flight
-    el = document.createElement('p');
-    el.id = 'ocrQueue';
-    el.className = 'small muted';
-    el.style.margin = '14px 0 0';
-    stage.appendChild(el);
-  }
-  return el;
-}
 
 function ocrWatch(on) {
   if (!on) {
@@ -860,10 +1073,10 @@ async function ocrTick() {
     if (!r.ok) return ocrWatch(false);
     d = await r.json();
   } catch (e) { return; }
-  if (!ocrTimer || !d) return;   // the host stepped off the worksheet while this was in flight
+  if (!ocrTimer || !d) return;   // the last worksheet was deleted while this was in flight
   const n = (d.running || 0) + (d.waiting || 0);
   const eta = d.etaSeconds > 0 ? ' · about ' + d.etaSeconds + 's' : '';
-  const el = ocrLine();
+  const el = document.getElementById('ocrQueue');   // gone once showEnded() has replaced the page
   if (el) el.textContent = n ? n + (n === 1 ? ' photo' : ' photos') + ' being read' + eta : '';
 }
 
@@ -928,15 +1141,16 @@ async function viewWorksheets(pollId) {
 }
 
 function renderQA() {
-  const board = document.getElementById('qaBoard');
-  document.getElementById('qCount').textContent = state.questions.length + (state.questions.length === 1 ? ' question' : ' questions');
-  if (!state.questions.length) { board.innerHTML = '<p class="empty">Questions from the audience appear here.</p>'; return; }
-  board.innerHTML = state.questions
-    .map((q) => '<div class="qitem"><div class="qvote" style="cursor:default"><span class="arrow">▲</span>' + q.votes +
+  const qs = state.questions;
+  setText('qCount', qs.length + (qs.length === 1 ? ' question' : ' questions'));
+  let sig = 5381;
+  for (const q of qs) sig = hashAll(sig, q.id, q.text, q.votes, q.author || '');
+  paint('qaBoard', sig, () => (qs.length
+    ? qs.map((q) => '<div class="qitem"><div class="qvote" style="cursor:default"><span class="arrow">▲</span>' + q.votes +
       '</div><div class="qtext">' + esc(q.text) +
       (q.author ? '<div class="small muted" style="margin-top:3px">— ' + esc(q.author) + '</div>' : '') + '</div>' +
-      '<button class="btn ghost sm" onclick="api(\'/question/' + q.id + '/delete\')">Dismiss</button></div>')
-    .join('');
+      '<button class="btn ghost sm" onclick="api(\'/question/' + q.id + '/delete\')">Dismiss</button></div>').join('')
+    : '<p class="empty">Questions from the audience appear here.</p>'));
 }
 
 function esc(s) {

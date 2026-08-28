@@ -16,20 +16,25 @@
     </div>
 
     <div class="tabbar">
-      <div class="tab active" id="tabVote" onclick="showTab('vote')">Live poll</div>
+      <div class="tab active" id="tabVote" onclick="showTab('vote')">Questions</div>
       <div class="tab" id="tabQa" onclick="showTab('qa')">Q&amp;A</div>
     </div>
 
-    <!-- VOTE panel -->
+    <!-- VOTE panel — a self-paced walkthrough of the whole run of show:
+         progress and the jump list on top, one question at a time under it,
+         Back/Next in a card of its own so the worksheet's own sticky Send bar
+         has a floor to sit on. -->
     <div id="panelVote">
+      <div class="card sp-nav hidden" id="navCard"></div>
       <div class="card" id="voteCard">
         <div class="empty" id="voteEmpty">
           <p class="eyebrow" style="color:var(--green)">✓ You're in</p>
-          <h2 id="joinTitle" style="border:0">Waiting for the host…</h2>
-          <p>You're connected. The live poll appears here the moment the host starts it — or switch to <b>Q&amp;A</b> to ask a question now.</p>
+          <h2 id="joinTitle" style="border:0">Nothing to answer yet</h2>
+          <p>You're connected. Questions appear here as soon as the host writes them — or switch to <b>Q&amp;A</b> to ask something now.</p>
         </div>
         <div id="voteContent" class="hidden"></div>
       </div>
+      <div class="card sp-steps hidden" id="voteSteps"></div>
     </div>
 
     <!-- QA panel -->

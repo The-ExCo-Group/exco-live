@@ -301,3 +301,47 @@ code { font-family: ui-monospace, Menlo, monospace; font-size: 0.92em; backgroun
 .ws-sent-list { margin: 12px 0 0; padding-left: 21px; font-size: 14px; line-height: 1.5; }
 .ws-sent-list li { margin-top: 5px; }
 .ws-sent .btn + .ws-sent-list { margin-top: 18px; }
+
+/* ---- Self-paced walkthrough (participant) ----
+   The run of show now lives on the phone: a progress header that is always on
+   screen, the whole list one tap behind it, and Back/Next below the question.
+   All of this is chrome AROUND the answer inputs — no .answer-btn, .scale-btn
+   or .ws-* rule above moves, and the steps bar is a card of its own so the
+   worksheet's sticky Send bar still has the vote card's floor to land on. */
+.sp-nav { padding: 18px 22px; }
+.sp-progress { display: flex; align-items: baseline; gap: 12px; width: 100%; padding: 0; background: transparent; border: 0; color: var(--text); text-align: left; cursor: pointer; }
+.sp-count { flex: 1; font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; font-size: 13px; }
+.sp-caret { font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; font-size: 11px; color: var(--muted); }
+.sp-bar { height: 4px; margin-top: 12px; background: var(--surface-2); border-radius: 999px; overflow: hidden; }
+.sp-bar span { display: block; height: 100%; background: var(--green); transition: width var(--dur) var(--ease); }
+
+/* Every question, tappable, with its own answered/not answered state — someone
+   who joins late reads the whole shape of the session off this. */
+.sp-list { list-style: none; margin: 14px -10px 0; padding: 0; }
+.sp-item { display: flex; align-items: flex-start; gap: 12px; width: 100%; padding: 12px 10px; background: transparent; border: 0; border-top: 1px solid var(--line); color: var(--text); font-family: var(--font-body); font-size: 15px; text-align: left; cursor: pointer; }
+.sp-num { font-family: var(--font-serif); font-size: 17px; color: var(--muted); min-width: 22px; }
+/* Questions run to 2000 characters. Clamped in CSS and never cut in the string,
+   so a long one stays two lines here without being truncated mid-word. */
+.sp-q { flex: 1; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.sp-flag { padding-top: 3px; font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; font-size: 10px; color: var(--muted); white-space: nowrap; }
+.sp-item.done .sp-flag, .sp-item.done .sp-num { color: var(--green); }
+.sp-item.at { background: var(--surface-2); }
+.sp-item.at .sp-q { font-weight: 700; }
+.sp-item.shut .sp-q, .sp-item.shut .sp-num { color: var(--muted); }
+
+.sp-steps { display: flex; align-items: center; gap: 12px; padding: 14px 18px; }
+.sp-pos { flex: 1; text-align: center; font-family: var(--font-display); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; color: var(--muted); }
+
+/* Already answered, and still editable — the card says so, it never replaces
+   the inputs the way the old one-shot confirmation did. */
+.sp-state { margin: 0 0 18px; padding: 16px 18px; }
+
+/* End of the run. Skipped questions are listed as an offer, not a warning. */
+.sp-end { text-align: center; padding: 18px 0 4px; }
+.sp-todo { list-style: none; margin: 22px 0 0; padding: 0; }
+.sp-todo li + li { margin-top: 10px; }
+.sp-todo .sp-item { border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 13px 14px; }
+.sp-todo .sp-flag { color: var(--green); }
+
+/* Correcting one already-sent sheet, from the row that names it. */
+.ws-edit { background: transparent; border: 0; padding: 0; font: inherit; color: var(--green); text-decoration: underline; cursor: pointer; }

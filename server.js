@@ -91,11 +91,10 @@ const AI_MAX_WAIT_OCR_MS = envInt('AI_MAX_WAIT_OCR_MS', 240000, 1000);
 // rooms[code] = {
 //   code, title, createdAt,
 //   polls: [ Poll ],
-//   activePollId: string|null,
 //   questions: [ { id, text, votes, voters:Set, ts } ],   // Q&A board
 // }
 // Poll = {
-//   id, type, question, state:'draft'|'active'|'closed',
+//   id, type, question, state:'active'|'closed',
 //   options: [{id,text}],   // multiple_choice
 //   scaleMax,               // rating
 //   scaleLabelLow, scaleLabelHigh,
@@ -103,8 +102,57 @@ const AI_MAX_WAIT_OCR_MS = envInt('AI_MAX_WAIT_OCR_MS', 240000, 1000);
 //   words: [text],                     // word_cloud
 //   ratings: [number],                 // rating
 //   responses: [{id,text,ts}],         // open_text
+//   grids: [{id,ts,label,cells}],      // worksheet
+//   submitters: { option:{by:optionId}, rating:{by:value},
+//                 words:{by:[word]}, text:{by:responseId},
+//                 grid:{gridId:by} },      // worksheet — keyed the other way
 // }
+// Sessions are self-paced, so there is no current question and no room-wide
+// "live" slot: a poll is answerable from the moment it exists until someone
+// closes it. Only 'closed' is unanswerable — rows written under the presenter
+// model still say 'draft', and those stay open.
+//
+// `submitters` maps a participant's device id (the wire field `by`) to what
+// they last answered, which is the only way going back and changing an answer
+// can REPLACE it instead of adding a second one. It is the one structure that
+// ties a person to their answers, so it is never broadcast and never exported:
+// publicRoom(), participantRoom() and fetchRoomDetail() each enumerate their
+// own fields. Worksheets are the one entry keyed the other way round — grid id
+// to device — because one device deliberately submits many people's sheets: a
+// revision there names the grid it corrects, and this is what says whether that
+// grid is the sender's to correct. It cannot live ON the grid: grids go out
+// whole to anyone with the room code (GET /poll/:id/worksheet).
 const rooms = Object.create(null);
+
+// The keys are participant-supplied device ids, so these are null-prototype: on
+// a plain object someone whose id is '__proto__' reads back the prototype
+// instead of their last answer (the trap labelTally() sidesteps).
+const byMap = (o) => Object.assign(Object.create(null), o || {});
+const subMaps = (s) => ({
+  option: byMap((s || {}).option),
+  rating: byMap((s || {}).rating),
+  words: byMap((s || {}).words),
+  text: byMap((s || {}).text),
+  grid: byMap((s || {}).grid),
+});
+
+// words is a pure projection of its by-map, so one person's revision replaces
+// their set instead of stacking a second one. The cap has to bite on the map
+// rather than the array: slicing the projection would resurrect the dropped
+// words on the next rebuild.
+const WORDS_MAX = 5000;
+function rebuildWords(p) {
+  const m = p.submitters.words;
+  const keys = Object.keys(m);
+  let out = [];
+  for (const k of keys) out = out.concat(m[k]);
+  while (out.length > WORDS_MAX && keys.length > 1) {
+    const k = keys.shift();
+    out = out.slice(m[k].length);
+    delete m[k];
+  }
+  p.words = out;
+}
 
 // SSE clients per room: Map<code, Set<res>>
 const clients = new Map();
@@ -161,11 +209,13 @@ const inList = (ids) => `(${ids.join(',')})`;
 // change detector below fingerprints exactly what gets POSTed.
 // The tables are managed by hand, and PostgREST 400s the WHOLE batch on one
 // unknown column — so adding a field here without adding the column first stops
-// every poll of every type persisting, not just the new one. `grids` and
-// `worksheet` are new; run this once against the project before deploying:
+// every poll of every type persisting, not just the new one. `grids`,
+// `worksheet` and `submitters` are new; run this once against the project
+// before deploying:
 //   alter table polls
 //     add column if not exists grids jsonb not null default '[]'::jsonb,
-//     add column if not exists worksheet jsonb not null default '{}'::jsonb;
+//     add column if not exists worksheet jsonb not null default '{}'::jsonb,
+//     add column if not exists submitters jsonb not null default '{}'::jsonb;
 // Fingerprints are only committed once a write lands, so the next save() after
 // the columns exist re-sends everything the failed batch dropped — a room that is
 // still live recovers on its own. One already archived by /end never saves again.
@@ -185,6 +235,9 @@ const pollRow = (code, p, i) => ({
   ratings: p.ratings || [],
   responses: p.responses || [],
   grids: p.grids || [],
+  // Who answered what. Without it a restart loses the ability to revise: the
+  // count map alone cannot say which option to take the old vote off.
+  submitters: p.submitters || {},
   // One jsonb blob rather than five more columns: this row shape is written out
   // field by field, and the five are only ever read back together.
   worksheet: p.type === 'worksheet'
@@ -237,7 +290,10 @@ async function persistRoom(code) {
     body: [{
       code: r.code,
       title: r.title,
-      active_poll_id: r.activePollId,
+      // Self-paced rooms have no current poll. Still written, explicitly null:
+      // a key left out of an upsert keeps whatever the row already had, which
+      // would strand a stale id on every room that ran presenter-driven.
+      active_poll_id: null,
       created_at: iso(r.createdAt),
       updated_at: iso(),
     }],
@@ -420,7 +476,6 @@ async function load() {
         code: rr.code,
         title: rr.title,
         createdAt: Date.parse(rr.created_at) || Date.now(),
-        activePollId: rr.active_poll_id || null,
         polls: [],
         questions: [],
       };
@@ -438,7 +493,7 @@ async function load() {
       const r = rooms[p.room_code];
       if (!r) continue;
       const w = p.worksheet || {};
-      r.polls.push({
+      const poll = {
         id: p.id,
         type: p.type,
         question: p.question,
@@ -452,12 +507,20 @@ async function load() {
         ratings: p.ratings || [],
         responses: p.responses || [],
         grids: p.grids || [],
+        submitters: subMaps(p.submitters),
         rows: w.rows || [],
         columns: w.columns || [],
         rowHeader: w.rowHeader || '',
         instructions: w.instructions || '',
         footnote: w.footnote || '',
-      });
+      };
+      // Rows written before per-submitter records existed hold answers but no
+      // map, and words/ratings are rebuilt FROM the map — so seed one entry per
+      // existing answer, or the first revision after a restart wipes the poll.
+      // '#' keys can never collide with a device id, so those stay un-revisable.
+      if (!Object.keys(poll.submitters.words).length) for (const w2 of poll.words) poll.submitters.words['#' + id()] = [w2];
+      if (!Object.keys(poll.submitters.rating).length) for (const v of poll.ratings) poll.submitters.rating['#' + id()] = v;
+      r.polls.push(poll);
     }
     for (const q of qRows || []) {
       const r = rooms[q.room_code];
@@ -489,7 +552,7 @@ async function load() {
 async function analyticsList() {
   if (!SB_ENABLED) return { sessions: [], totals: { sessions: 0, responses: 0, questions: 0 } };
   const [roomRows, pollRows, qRows] = await Promise.all([
-    sb('GET', '/rooms?select=code,title,created_at,ended_at,active_poll_id&order=created_at.desc'),
+    sb('GET', '/rooms?select=code,title,created_at,ended_at&order=created_at.desc'),
     sb('GET', '/polls?select=room_code,total_votes'),
     sb('GET', '/questions?select=room_code'),
   ]);
@@ -534,7 +597,6 @@ async function fetchRoomDetail(code) {
     title: r.title,
     createdAt: r.created_at,
     endedAt: r.ended_at,
-    activePollId: r.active_poll_id,
     polls: (polls || []).map((p) => ({
       id: p.id,   // the dashboard needs to address one specific poll, not just its position
       position: p.position,
@@ -1625,7 +1687,6 @@ function publicRoom(r) {
   return {
     code: r.code,
     title: r.title,
-    activePollId: r.activePollId,
     polls: r.polls.map((p) => ({
       id: p.id,
       type: p.type,
@@ -1658,36 +1719,35 @@ function publicRoom(r) {
   };
 }
 
-// Slim frame for participant phones. join.js reads only the active poll and the
-// Q&A vote counts, never per-poll results — so shipping the whole room to 100
-// phones on every submission was pure waste (and the OOM). `polls` stays an
-// ARRAY of one so join.js's polls.find(...) keeps working untouched.
+// Slim frame for participant phones. Self-paced, so a phone now needs the WHOLE
+// run of show to step through — but DEFINITIONS ONLY. Answer bodies (responses,
+// words, ratings, votes, grids) still never fan out to 100 phones on every
+// submission, which is the waste that caused the OOM. Measured on a 20-poll run
+// of show: 8.8 KB, and byte-identical after 2,800 answers land — the same room's
+// stage frame goes from 12 KB to 130 KB. Not even a response COUNT, which the
+// old one-poll frame could afford: a count moves on every submission, and that
+// alone would re-send all 20 definitions to every phone 8 times a second.
 function participantRoom(r) {
-  const p = r.polls.find((x) => x.id === r.activePollId);
   return {
     code: r.code,
     title: r.title,
-    activePollId: r.activePollId,
-    polls: p
-      ? [{
-        id: p.id,
-        type: p.type,
-        question: p.question,
-        state: p.state,
-        options: p.options,
-        scaleMax: p.scaleMax,
-        scaleLabelLow: p.scaleLabelLow,
-        scaleLabelHigh: p.scaleLabelHigh,
-        // The grid definition, without a single body: a phone cannot render the
-        // worksheet at all without these five, and needs nothing else.
-        rows: p.rows || [],
-        columns: p.columns || [],
-        rowHeader: p.rowHeader || '',
-        instructions: p.instructions || '',
-        footnote: p.footnote || '',
-        totalVotes: totalVotes(p),   // aggregate only — never the raw responses
-      }]
-      : [],
+    polls: r.polls.map((p) => ({
+      id: p.id,
+      type: p.type,
+      question: p.question,
+      state: p.state,   // 'closed' is the only thing a phone must not offer
+      options: p.options,
+      scaleMax: p.scaleMax,
+      scaleLabelLow: p.scaleLabelLow,
+      scaleLabelHigh: p.scaleLabelHigh,
+      // The grid definition, without a single body: a phone cannot render the
+      // worksheet at all without these five, and needs nothing else.
+      rows: p.rows || [],
+      columns: p.columns || [],
+      rowHeader: p.rowHeader || '',
+      instructions: p.instructions || '',
+      footnote: p.footnote || '',
+    })),
     questions: r.questions
       .map((q) => ({ id: q.id, text: q.text, votes: q.votes, ts: q.ts, author: q.author || '' }))
       .sort((a, b) => b.votes - a.votes || a.ts - b.ts),
@@ -1748,10 +1808,11 @@ const bcLast = new Map();     // code -> ms of the last emit
 // megabytes of backlog into our heap, which is what actually caused the OOM.
 function writeSse(res, frame) {
   try {
-    if (res.writableLength > (1 << 20)) return;
+    if (res.writableLength > (1 << 20)) return false;
     res.write(frame);
+    return true;
   } catch {
-    /* dead connection cleaned up on close */
+    return false;   /* dead connection cleaned up on close */
   }
 }
 
@@ -1766,8 +1827,14 @@ function emit(code) {
   for (const res of set) {
     // Serialize once per view per tick, and only build the stage frame if a
     // stage client is actually watching.
-    if (res.lpView === 'stage') writeSse(res, (stage || (stage = `data: ${JSON.stringify(publicRoom(r))}\n\n`)));
-    else writeSse(res, (join || (join = `data: ${JSON.stringify(participantRoom(r))}\n\n`)));
+    if (res.lpView === 'stage') { writeSse(res, (stage || (stage = `data: ${JSON.stringify(publicRoom(r))}\n\n`))); continue; }
+    // A phone's frame is definitions only, so a submission usually changes
+    // nothing in it — and re-sending the same 9 KB to 100 phones eight times a
+    // second is the fan-out we just removed, coming back through another door.
+    // Tracked per client, not per room: one that never got this frame (a
+    // dropped write) has to still receive it.
+    const f = (join || (join = `data: ${JSON.stringify(participantRoom(r))}\n\n`));
+    if (res.lpFrame !== f && writeSse(res, f)) res.lpFrame = f;
   }
 }
 
@@ -2009,13 +2076,19 @@ function cleanMulti(str, max = 400) {
 // persisted and never broadcast.
 const SID_MAX = 4000;
 function applied(holder, sid) {
-  if (!sid) return false;   // no sid — old clients behave exactly as before
-  if (!holder.sids) { holder.sids = new Set(); holder.sidQ = []; }
-  if (holder.sids.has(sid)) return true;
-  holder.sids.add(sid);
+  if (!sid) return undefined;   // no sid — old clients behave exactly as before
+  if (!holder.sids) { holder.sids = new Map(); holder.sidQ = []; }
+  if (holder.sids.has(sid)) return holder.sids.get(sid);
+  holder.sids.set(sid, true);
   holder.sidQ.push(sid);
   if (holder.sidQ.length > SID_MAX) holder.sids.delete(holder.sidQ.shift());
-  return false;
+  return undefined;
+}
+
+// A retry has to be answered with the SAME grid id, or the phone whose first
+// send timed out can never revise the sheet it actually created.
+function remember(holder, sid, value) {
+  if (sid && holder.sids && holder.sids.has(sid)) holder.sids.set(sid, value);
 }
 
 // One axis of a worksheet grid. The ids are positional (r1..rN / c1..cN), never
@@ -2050,7 +2123,9 @@ function makePoll(def) {
     id: id(),
     type,
     question: clean(def.question, QUESTION_MAX) || 'Untitled question',
-    state: 'draft',
+    // Answerable from creation: participants arrive and start working through
+    // the run of show themselves, with no presenter to open anything for them.
+    state: 'active',
     options: [],
     scaleMax: 5,
     scaleLabelLow: clean(def.scaleLabelLow, 40) || 'Poor',
@@ -2065,6 +2140,7 @@ function makePoll(def) {
     instructions: '',
     footnote: '',
     grids: [],
+    submitters: subMaps(),
   };
   if (type === 'multiple_choice') {
     const opts = Array.isArray(def.options) ? def.options : [];
@@ -2231,7 +2307,6 @@ async function handleApi(req, res, seg, url) {
       title: clean(body.title, TITLE_MAX) || 'Untitled session',
       createdAt: now(),
       polls,
-      activePollId: null,
       questions: [],
     };
     save(code);
@@ -2392,7 +2467,9 @@ async function handleApi(req, res, seg, url) {
       'X-Accel-Buffering': 'no',   // no proxy in front of us may buffer the stream
     });
     res.write('retry: 3000\n\n');
-    res.write(`data: ${JSON.stringify(res.lpView === 'stage' ? publicRoom(room) : participantRoom(room))}\n\n`);
+    const first = `data: ${JSON.stringify(res.lpView === 'stage' ? publicRoom(room) : participantRoom(room))}\n\n`;
+    res.write(first);
+    if (res.lpView !== 'stage') res.lpFrame = first;
 
     if (!clients.has(code)) clients.set(code, new Set());
     clients.get(code).add(res);
@@ -2425,6 +2502,11 @@ async function handleApi(req, res, seg, url) {
   // for analytics), tell joiners it's over, and drop it from the live layer.
   if (seg[0] === 'room' && seg[2] === 'end' && req.method === 'POST') {
     if (!room) return notFound(res);
+    // Nothing in the session is answerable once it is over, and with no live
+    // slot left the poll state is the only thing that says so — both to a phone
+    // still holding the run of show and to the archive.
+    for (const p of room.polls) p.state = 'closed';
+    save(code);
     let persisted = await flushRoom(code);   // land the last batch first — dropping it lost up to 54 submissions
     cancelSave(code);        // then stop anything further racing the archive
     if (SB_ENABLED) {
@@ -2489,7 +2571,7 @@ async function handleApi(req, res, seg, url) {
     if (!AI_ENABLED) return send(res, 503, { error: 'ai_not_configured' });
     const p = room.polls.find((x) => x.id === seg[3]);
     if (!p || p.type !== 'worksheet') return notFound(res);
-    if (p.state !== 'active') return send(res, 409, { error: 'poll_not_active' });
+    if (p.state === 'closed') return send(res, 409, { error: 'poll_not_active' });
     const body = await readBody(req, OCR_BODY_MAX);
     if (!OCR_MEDIA.has(body.mediaType)) return send(res, 400, { error: 'bad_media_type' });
     let buf;
@@ -2545,7 +2627,6 @@ async function handleApi(req, res, seg, url) {
       if (body.replace) {
         // keep any poll that already has responses; drop untouched drafts
         room.polls = room.polls.filter((p) => totalVotes(p) > 0);
-        room.activePollId = null;
       }
       const created = defs.map((d) => makePoll(d));
       room.polls.push(...created);
@@ -2578,25 +2659,22 @@ async function handleApi(req, res, seg, url) {
         catch (e) { return sendAiError(res, e); }
       }
 
-      // activate — makes this the live poll
+      // Re-open one closed poll. It no longer closes the others: the room is
+      // never held on a single question, so there is no live slot to hand over.
       if (op === 'activate') {
-        for (const p of room.polls) if (p.state === 'active') p.state = 'closed';
         poll.state = 'active';
-        room.activePollId = poll.id;
         save(code);
         broadcast(code, true);
         return send(res, 200, { ok: true });
       }
       if (op === 'close') {
         poll.state = 'closed';
-        if (room.activePollId === poll.id) room.activePollId = null;
         save(code);
         broadcast(code, true);
         return send(res, 200, { ok: true });
       }
       if (op === 'delete') {
         room.polls = room.polls.filter((p) => p.id !== poll.id);
-        if (room.activePollId === poll.id) room.activePollId = null;
         save(code);
         broadcast(code, true);
         return send(res, 200, { ok: true });
@@ -2618,24 +2696,40 @@ async function handleApi(req, res, seg, url) {
         poll.ratings = [];
         poll.responses = [];
         poll.grids = [];
+        // Or the next person to answer takes their old vote off a count that
+        // reset has already zeroed.
+        poll.submitters = subMaps();
         save(code);
         broadcast(code, true);
         return send(res, 200, { ok: true });
       }
 
       // ---- Participant submissions --------------------------------
-      // Only allow submissions to the active poll.
-      if (poll.state !== 'active') return send(res, 409, { error: 'poll_not_active' });
+      // Self-paced: every poll is answerable until it is closed (by /close, or
+      // by /end taking the whole session down). The 409 shape is untouched, so
+      // the client's "Question closed" notice still fires on the one case that
+      // really is unanswerable.
+      if (poll.state === 'closed') return send(res, 409, { error: 'poll_not_active' });
+
+      // The device id from localStorage, NOT the per-submission sid: this is the
+      // same person coming back to change their mind. Empty on an older cached
+      // client, and every handler below then appends exactly as it always did.
+      const by = clean(body.by, 64);
 
       if (op === 'vote' && poll.type === 'multiple_choice') {
         if (applied(poll, clean(body.sid, 64))) return send(res, 200, { ok: true, duplicate: true });
-        if (Object.prototype.hasOwnProperty.call(poll.votes, body.optionId)) {
-          poll.votes[body.optionId]++;
-          save(code);
-          broadcast(code);
-          return send(res, 200, { ok: true });
-        }
-        return send(res, 400, { error: 'bad_option' });
+        if (!Object.prototype.hasOwnProperty.call(poll.votes, body.optionId)) return send(res, 400, { error: 'bad_option' });
+        const prev = by ? poll.submitters.option[by] : undefined;
+        if (prev === body.optionId) return send(res, 200, { ok: true, optionId: prev });
+        // Move the vote rather than add a second one. votes stays the derived
+        // count map the stage, the CSV and total_votes already read, so nothing
+        // downstream can tell a revision from a first answer.
+        if (prev !== undefined && Object.prototype.hasOwnProperty.call(poll.votes, prev)) poll.votes[prev]--;
+        poll.votes[body.optionId]++;
+        if (by) poll.submitters.option[by] = body.optionId;
+        save(code);
+        broadcast(code);
+        return send(res, 200, { ok: true, optionId: body.optionId });
       }
       if (op === 'word' && poll.type === 'word_cloud') {
         if (applied(poll, clean(body.sid, 64))) return send(res, 200, { ok: true, duplicate: true });
@@ -2644,37 +2738,74 @@ async function handleApi(req, res, seg, url) {
           .map((w) => w.trim())
           .filter(Boolean)
           .slice(0, 5);
-        for (const w of words) poll.words.push(w);
-        if (poll.words.length > 5000) poll.words = poll.words.slice(-5000);
+        // A send that parses to nothing — a lone comma, a pasted control
+        // character — must not stand as an empty set: words is a projection of
+        // this map, so writing [] here DELETES what this device sent before and
+        // answers 200 while doing it. Same guard open_text has.
+        if (!words.length) return send(res, 400, { error: 'empty' });
+        // Keyed even when nobody claimed it: words is rebuilt from this map, so
+        // a set that lived only in the array would vanish at the next person's
+        // revision. A '#' key cannot collide with a device id (they are base36),
+        // which is what keeps an unclaimed set un-revisable, exactly as before.
+        poll.submitters.words[by || '#' + id()] = words;
+        rebuildWords(poll);
         save(code);
         broadcast(code);
-        return send(res, 200, { ok: true });
+        return send(res, 200, { ok: true, words });
       }
       if (op === 'rate' && poll.type === 'rating') {
         if (applied(poll, clean(body.sid, 64))) return send(res, 200, { ok: true, duplicate: true });
         const v = parseInt(body.value, 10);
-        if (v >= 1 && v <= poll.scaleMax) {
-          poll.ratings.push(v);
-          save(code);
-          broadcast(code);
-          return send(res, 200, { ok: true });
-        }
-        return send(res, 400, { error: 'bad_value' });
+        if (!(v >= 1 && v <= poll.scaleMax)) return send(res, 400, { error: 'bad_value' });
+        poll.submitters.rating[by || '#' + id()] = v;   // same '#' rule as word_cloud
+        poll.ratings = Object.values(poll.submitters.rating);
+        save(code);
+        broadcast(code);
+        return send(res, 200, { ok: true, value: v });
       }
       if (op === 'text' && poll.type === 'open_text') {
         if (applied(poll, clean(body.sid, 64))) return send(res, 200, { ok: true, duplicate: true });
         const t = cleanMulti(body.text, ANSWER_MAX);
-        if (t) {
-          poll.responses.push({ id: id(), text: t, ts: now(), author: clean(body.author, 40) });
+        if (!t) return send(res, 400, { error: 'empty' });
+        const author = clean(body.author, 40);
+        // The device id is held in submitters, never on the response itself:
+        // responses are broadcast to the stage and served by an unauthenticated
+        // GET, and an id sitting on each one would let anyone thread one
+        // person's answers together across the whole session.
+        const prev = by ? poll.responses.find((x) => x.id === poll.submitters.text[by]) : null;
+        if (prev) {
+          prev.text = t;
+          prev.ts = now();
+          prev.author = author;
+        } else {
+          const rsp = { id: id(), text: t, ts: now(), author };
+          poll.responses.push(rsp);
           if (poll.responses.length > 2000) poll.responses = poll.responses.slice(-2000);
-          save(code);
-          broadcast(code);
-          return send(res, 200, { ok: true });
+          if (by) poll.submitters.text[by] = rsp.id;
         }
-        return send(res, 400, { error: 'empty' });
+        save(code);
+        broadcast(code);
+        return send(res, 200, { ok: true });
       }
       if (op === 'worksheet' && poll.type === 'worksheet') {
-        if (applied(poll, clean(body.sid, 64))) return send(res, 200, { ok: true, duplicate: true });
+        const sid = clean(body.sid, 64);
+        const dup = applied(poll, sid);
+        if (dup) return send(res, 200, { ok: true, duplicate: true, gridId: dup === true ? undefined : dup });
+        // Worksheets do NOT revise by submitter: one device deliberately submits
+        // 4-10 of its table's paper sheets, and those must keep appending. A
+        // correction names the sheet it corrects — and `by` says whether that
+        // sheet is this device's to correct.
+        const gridId = clean(body.gridId, 64);
+        let at = gridId ? poll.grids.findIndex((g) => g.id === gridId) : -1;
+        // Anything else — someone else's sheet, one the host has reset away, one
+        // the 500 cap evicted — is filed as a NEW sheet rather than rejected.
+        // Grid ids are not secret (GET /poll/:id/worksheet is unauthenticated),
+        // so without the ownership half one phone could rewrite every table's
+        // answers in place with the sheet count, the label tally and totalVotes
+        // all unchanged. And a rejection is worse than useless to the honest
+        // half: the correction is still their own answers, there is nothing left
+        // to overwrite, and the phone would retry a call that can never succeed.
+        if (at >= 0 && (!by || poll.submitters.grid[gridId] !== by)) at = -1;
         const src = (body.cells && typeof body.cells === 'object') ? body.cells : {};
         // Keys are built from this poll's own axes, so a key from a stale draft
         // (or anything else) is dropped rather than stored under a cell that no
@@ -2693,7 +2824,9 @@ async function handleApi(req, res, seg, url) {
         // table number) is how the facilitator tells them apart afterwards.
         // Optional by design: an individual filling in their own sheet has
         // nothing to say here, and '' must stay a valid submission.
-        const grid = { id: id(), ts: now(), author: clean(body.author, 40), label: clean(body.label, 40), source, cells };
+        // ts is when this content landed, not when the sheet first arrived: the
+        // row describes the corrected sheet.
+        const grid = { id: at >= 0 ? gridId : id(), ts: now(), author: clean(body.author, 40), label: clean(body.label, 40), source, cells };
         if (source === 'photo') {
           // The model's PRE-EDIT transcription, sanitized identically and keyed
           // by this poll's own axes so a stale or unknown key is dropped.
@@ -2710,11 +2843,28 @@ async function handleApi(req, res, seg, url) {
           }
           if (Object.keys(raw).length) grid.ocrRaw = raw;
         }
-        poll.grids.push(grid);
-        if (poll.grids.length > 500) poll.grids = poll.grids.slice(-500);
+        if (at >= 0) {
+          poll.grids[at] = grid;
+        } else {
+          poll.grids.push(grid);
+          if (poll.grids.length > 500) {
+            poll.grids = poll.grids.slice(-500);
+            // The owner map is keyed by grid id, so evicted sheets have to be
+            // dropped from it too or it grows for the whole session.
+            const live = new Set(poll.grids.map((g) => g.id));
+            for (const k of Object.keys(poll.submitters.grid)) if (!live.has(k)) delete poll.submitters.grid[k];
+          }
+        }
+        // Who may correct this sheet later. Empty `by` (an older cached client)
+        // records nobody, which leaves the sheet append-only — the same place
+        // sheets submitted before this existed are in.
+        if (by) poll.submitters.grid[grid.id] = by;
+        // The one thing a phone cannot work out for itself, and it needs it to
+        // come back and correct this sheet later.
+        remember(poll, sid, grid.id);
         save(code);
         broadcast(code);
-        return send(res, 200, { ok: true });
+        return send(res, 200, { ok: true, gridId: grid.id });
       }
     }
 

@@ -61,24 +61,30 @@
         </div>
       </div>
 
-      <!-- RIGHT: stage -->
+      <!-- RIGHT: progress, then every question with its own live results -->
       <div class="grow">
-        <div class="card" id="stage" style="min-height:440px;">
-          <div class="row" id="stageNav" style="align-items:center; margin-bottom:18px;">
-            <button class="btn ghost sm" id="prevBtn" onclick="step(-1)">◀ Prev</button>
-            <span class="type-chip" id="navPos"></span>
-            <button class="btn sm" id="nextBtn" onclick="step(1)">Next ▶</button>
-            <span class="muted small" style="margin-left:8px">← → to navigate</span>
+        <div class="card" id="progressCard">
+          <div id="progressBody"></div>
+          <p class="small muted" id="ocrQueue" style="margin:14px 0 0"></p>
+        </div>
+
+        <div id="stage" style="margin-top:20px">
+          <div class="row" style="align-items:center; margin-bottom:14px;">
+            <p class="eyebrow" style="margin:0">Live results</p>
+            <span class="type-chip" id="stageCount"></span>
+            <button class="btn ghost sm right hidden" id="foldAllBtn" onclick="toggleAll()">Collapse all</button>
           </div>
-          <div class="empty" id="stageEmpty">
-            <p class="eyebrow">No poll on screen</p>
-            <h2 style="border:0">Preload your questions, then step through them live.</h2>
-            <p class="muted">Use <b>Preload</b> to paste a whole run of show, or <b>+ New poll</b> to add one. Hit <b>Next</b> or → to present.</p>
+          <div class="card" id="stageEmpty">
+            <div class="empty">
+              <p class="eyebrow">Nothing to answer yet</p>
+              <h2 style="border:0">Add your questions — the room starts the moment they exist.</h2>
+              <p class="muted">Use <b>Preload</b> to paste a whole run of show, or <b>+ New poll</b> to add one. Everyone works through them at their own pace.</p>
+            </div>
           </div>
           <div id="stageContent" class="hidden"></div>
         </div>
 
-        <div class="card">
+        <div class="card" style="margin-top:20px">
           <div class="row" style="align-items:center"><p class="eyebrow" style="margin:0">Audience Q&amp;A</p>
             <button class="btn ghost sm" onclick="aiQa()">AI: Group questions</button>
             <span class="pill right" id="qCount">0</span></div>
@@ -113,8 +119,8 @@
       <div id="typeFields"></div>
       <div style="height:18px"></div>
       <div class="row">
-        <button class="btn go grow" onclick="createPoll(true)">Create &amp; present</button>
-        <button class="btn ghost" onclick="createPoll(false)">Add to run of show</button>
+        <button class="btn go grow" onclick="createPoll()">Add to run of show</button>
+        <button class="btn ghost" onclick="closeCreate()">Cancel</button>
       </div>
     </div>
   </div>
@@ -124,7 +130,7 @@
     <div class="modal-card">
       <div class="row" style="align-items:center"><p class="eyebrow" style="margin:0">Preload questions</p>
         <button class="btn ghost sm right" onclick="closeImport()">Close</button></div>
-      <p class="sub" style="margin:10px 0 12px">Paste your whole run of show. One block per question — they load in order as drafts you can present one by one.</p>
+      <p class="sub" style="margin:10px 0 12px">Paste your whole run of show. One block per question — they load in order, and the room can start working through them straight away.</p>
       <div class="help">[mc] Which region are you joining from?
 - Americas
 - EMEA
@@ -151,7 +157,7 @@
       <label>Your questions</label>
       <textarea id="importText" style="min-height:200px; font-family:ui-monospace,Menlo,monospace; font-size:13px"></textarea>
       <label style="display:flex;align-items:center;gap:8px;text-transform:none;letter-spacing:0;font-family:var(--font-body);font-size:14px;color:var(--text)">
-        <input type="checkbox" id="importReplace" style="width:auto" /> Replace existing unanswered drafts</label>
+        <input type="checkbox" id="importReplace" style="width:auto" /> Replace questions nobody has answered yet</label>
       <div style="height:14px"></div>
       <div class="row"><button class="btn go grow" onclick="runImport()">Load questions</button></div>
     </div>

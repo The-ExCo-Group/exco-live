@@ -277,6 +277,11 @@ async function openDetail(code) {
   d.polls.forEach((p) => {
     html += '<div class="card" style="margin-bottom:16px">' +
       '<div class="row" style="align-items:center"><span class="type-chip">' + TYPE_LABEL[p.type] + '</span>' +
+      // Self-paced rooms have no live slot, so 'closed' is the only state left that
+      // means anything — and without it a question nobody has reached yet and one
+      // the facilitator shut early both read as nothing but a zero. Legacy rows
+      // still say 'draft' or 'active'; the server treats both as open, so must this.
+      (p.state === 'closed' ? '<span class="type-chip">Closed</span>' : '') +
       (p.type === 'worksheet'
         ? '<button class="btn ghost sm" onclick="aiWorksheet(\'' + esc(code) + '\',\'' + esc(p.id) + '\')">AI: Analyse worksheet</button>'
         : '') +
@@ -401,7 +406,10 @@ function renderResult(p) {
   }
   // open_text
   if (!p.responses.length) return '<p class="muted small">No responses submitted.</p>';
-  return '<div class="responses">' + p.responses.map((r) => '<div class="response">' + esc(r.text) +
+  // Same reason as the worksheet cells above: open text is stored via cleanMulti,
+  // so a paragraph break the participant typed reaches the archive intact and
+  // would otherwise collapse into one run-on line here.
+  return '<div class="responses">' + p.responses.map((r) => '<div class="response" style="white-space:pre-wrap">' + esc(r.text) +
     (r.author ? '<div class="small muted" style="margin-top:6px">— ' + esc(r.author) + '</div>' : '') + '</div>').join('') + '</div>';
 }
 
